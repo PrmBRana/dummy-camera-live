@@ -1,0 +1,29 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config EXAMPLES_IPCC_TEST
+	tristate "\"IPCC Test\" example"
+	default n
+	---help---
+		Enable the \"IPCC Test\" example
+
+if EXAMPLES_IPCC_TEST
+
+config EXAMPLES_IPCC_TEST_PROGNAME
+	string "Program name"
+	default "ipcc_test"
+	---help---
+		This is the name of the program that will be used when the NSH ELF
+		program is installed.
+
+config EXAMPLES_IPCC_TEST_PRIORITY
+	int "IPCC Test task priority"
+	default 100
+
+config EXAMPLES_IPCC_TEST_STACKSIZE
+	int "IPCC Test stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+endif

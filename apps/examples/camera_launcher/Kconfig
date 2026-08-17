@@ -1,0 +1,6 @@
+config EXAMPLES_CAMERA_LAUNCHER
+	bool "Camera Launcher"
+	default n
+	depends on UORB
+	---help---
+		Start camera and subscriber together using launcher app
