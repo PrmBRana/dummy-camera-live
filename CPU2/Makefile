@@ -197,7 +197,7 @@ $(TARGET).bin: $(TARGET).elf
 
 	@echo ""
 	@echo "========================================"
-	@echo " M0+ BUILD SUCCESS"
+	@echo " M0+ BUILD SUCCESS: $(TARGET)"
 	@echo "========================================"
 	@echo " ELF : $(TARGET).elf"
 	@echo " BIN : $(TARGET).bin"
@@ -205,7 +205,21 @@ $(TARGET).bin: $(TARGET).elf
 	@echo " Flash address: 0x08032000"
 	@echo "========================================"
 
-	@$(SIZE) $(TARGET).elf
+	@$(SIZE) $(TARGET).elf | awk 'NR==2 { \
+		text=$$1; data=$$2; bss=$$3; \
+		flash=text+data; ram=data+bss; \
+		c2_flash=56*1024; c2_ram=28*1024; \
+		f_used=flash; f_free=c2_flash-flash; f_pct=f_used*100/c2_flash; f_free_pct=100-f_pct; \
+		r_used=ram; r_free=c2_ram-ram; r_pct=r_used*100/c2_ram; r_free_pct=100-r_pct; \
+		printf "\n==================================== CPU2 (M0+) MEMORY USAGE SUMMARY ====================================\n"; \
+		printf "  %-18s  %-19s  %-21s  %-20s  %7s  %7s\n", "Memory Region", "Total Capacity", "Used Space", "Free / Available", "Used %", "Free %"; \
+		printf "  ------------------  -------------------  ---------------------  --------------------  -------  -------\n"; \
+		printf "  %-18s  %5.1f KB (%6d B)  %5.1f KB (%6d B)  %5.1f KB (%6d B)   %5.1f%%   %5.1f%%\n", "CPU2 Flash (M0+)", c2_flash/1024, c2_flash, f_used/1024, f_used, f_free/1024, f_free, f_pct, f_free_pct; \
+		printf "  %-18s  %5.1f KB (%6d B)  %5.1f KB (%6d B)  %5.1f KB (%6d B)   %5.1f%%   %5.1f%%\n", "CPU2 RAM (SRAM2)", c2_ram/1024, c2_ram, r_used/1024, r_used, r_free/1024, r_free, r_pct, r_free_pct; \
+		printf "  %-18s  %5.1f KB (%6d B)  [  Reserved for M4 <-> M0+ Shared Ringbuffer at 0x20008000  ]\n", "Shared IPC SRAM2", 4.0, 4096; \
+		printf "==========================================================================================================\n\n"; \
+	}'
+
 
 
 # ==========================================================================
@@ -271,7 +285,21 @@ flash_gs flash_GS:
 # ==========================================================================
 
 size: $(TARGET).elf
-	$(SIZE) $<
+	@$(SIZE) $< | awk 'NR==2 { \
+		text=$$1; data=$$2; bss=$$3; \
+		flash=text+data; ram=data+bss; \
+		c2_flash=56*1024; c2_ram=28*1024; \
+		f_used=flash; f_free=c2_flash-flash; f_pct=f_used*100/c2_flash; f_free_pct=100-f_pct; \
+		r_used=ram; r_free=c2_ram-ram; r_pct=r_used*100/c2_ram; r_free_pct=100-r_pct; \
+		printf "\n==================================== CPU2 (M0+) MEMORY USAGE SUMMARY ====================================\n"; \
+		printf "  %-18s  %-19s  %-21s  %-20s  %7s  %7s\n", "Memory Region", "Total Capacity", "Used Space", "Free / Available", "Used %", "Free %"; \
+		printf "  ------------------  -------------------  ---------------------  --------------------  -------  -------\n"; \
+		printf "  %-18s  %5.1f KB (%6d B)  %5.1f KB (%6d B)  %5.1f KB (%6d B)   %5.1f%%   %5.1f%%\n", "CPU2 Flash (M0+)", c2_flash/1024, c2_flash, f_used/1024, f_used, f_free/1024, f_free, f_pct, f_free_pct; \
+		printf "  %-18s  %5.1f KB (%6d B)  %5.1f KB (%6d B)  %5.1f KB (%6d B)   %5.1f%%   %5.1f%%\n", "CPU2 RAM (SRAM2)", c2_ram/1024, c2_ram, r_used/1024, r_used, r_free/1024, r_free, r_pct, r_free_pct; \
+		printf "  %-18s  %5.1f KB (%6d B)  [  Reserved for M4 <-> M0+ Shared Ringbuffer at 0x20008000  ]\n", "Shared IPC SRAM2", 4.0, 4096; \
+		printf "==========================================================================================================\n\n"; \
+	}'
+
 
 
 # ==========================================================================
