@@ -328,7 +328,7 @@ static inline void stm32wl5_rcc_enableapb1(void)
   regval |= RCC_APB1ENR1_TIM2EN;
 #endif
 
-#ifdef CONFIG_STM32WL5_SPI2
+#if defined(CONFIG_STM32WL5_SPI2) || defined(CONFIG_STM32WL5_SPI2S2)
   /* SPI2 clock enable */
 
   regval |= RCC_APB1ENR1_SPI2EN;

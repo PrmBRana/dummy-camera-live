@@ -1,14 +1,16 @@
 /*
- * STM32WL55 Ground Station
+ * STM32WL55 Ground Station Firmware
  *
  * AX.25 + G3RUH + GFSK
  *
- * TX:
- * 437.375 MHz
+ * Uplink   (TX): 437.375 MHz (+22 dBm)
+ * Downlink (RX): 435.000 MHz
  *
- * RX:
- * 435.000 MHz
- *
+ * Features:
+ *  - Automatic Detection & Decoding of Beacon 1 (HK1: 34 Bytes, Voltages & Temperatures)
+ *  - Automatic Detection & Decoding of Beacon 2 (HK2: 38 Bytes, Currents & 6-Axis IMU/Mag)
+ *  - Telecommand Uplink: CAMERA RUN (13B), ADCS (13B), EPDM (13B), BURST REQUEST (0x01)
+ *  - Telecommand Confirmation: Parses Satellite ACK (0xAA) / NACK (0x55)
  */
 
 #include <stdint.h>
@@ -17,22 +19,17 @@
 #include <string.h>
 
 #include "stm32wlxx_hal.h"
-
 #include "radio.h"
 #include "subghz.h"
 #include "radio_driver.h"
 #include "radio_board_if.h"
-
 #include "uart_debug.h"
 
 #include "config.h"
 #include "radio_app.h"
 #include "protocol.h"
-
 #include "ax25.h"
 #include "g3ruh.h"
-
-
 
 /*
 =========================================================
@@ -42,30 +39,23 @@ GROUND STATION RADIO PROFILE
 
 const RadioConfig_t GroundStationProfile =
 {
-    /* Ground station transmit frequency, satellite uplink receiver */
+    /* Ground station transmit frequency (satellite uplink receiver) */
     .txFrequency = 437375000UL,
 
-    /* Ground station receive frequency, satellite downlink transmitter */
+    /* Ground station receive frequency (satellite downlink transmitter) */
     .rxFrequency = 435000000UL,
 
-    /* AX25 address */
+    /* AX.25 address */
     .sourceCallsign = "GROUND",
-    /* FIX: aligned to 0 to match the SSID the satellite side uses when
-       addressing frames to "GROUND" (SatelliteProfile.destSSID = 0).
-       AX25_DecodeAddress() doesn't compare SSID today so this wasn't
-       breaking the link, but it was inconsistent data - both ends
-       should agree on GROUND's SSID. */
     .sourceSSID = 0,
 
     /* Satellite address */
     .destCallsign = "NEPSAT",
-    .destSSID = 0,
+    .destSSID = 1,
 
     /* Ground station mode */
     .isSatelliteMode = false
 };
-
-
 
 /*
 =========================================================
@@ -74,13 +64,9 @@ SYSTEM CONFIGURATION
 */
 
 #define CMD_LINE_MAX        32
-#define RX_WATCHDOG_MS      5000
 #define TX_TIMEOUT_MS       3000
 #define RX_SESSION_MS       60000
-
 #define RX_HEARTBEAT_MS     3000
-
-
 
 /*
 =========================================================
@@ -89,7 +75,6 @@ GLOBAL RADIO FLAGS
 */
 
 volatile uint8_t tx_busy = 0;
-
 volatile uint8_t rx_frame_buffer[AX25_MAX_FRAME_SIZE];
 volatile uint16_t rx_frame_size = 0;
 
@@ -97,49 +82,19 @@ volatile uint8_t rx_done_flag = 0;
 volatile uint8_t rx_timeout_flag = 0;
 volatile uint8_t rx_error_flag = 0;
 
-
-
 /*
 =========================================================
-RX EVENT COUNTERS
+RX EVENT COUNTERS & STATS
 =========================================================
 */
 
-static uint32_t stat_rx_timeouts = 0;
-static uint32_t stat_rx_errors = 0;
-static uint32_t stat_rx_crc_errors = 0;
-static uint32_t stat_rx_header_errors = 0;
-
-/* captured inside SUBGHZ_Radio_IRQHandler() BEFORE HAL_SUBGHZ_IRQHandler()
-   clears the IRQ register, so OnRxError() can read a real value instead of
-   the stale 0x0000 it got from calling SUBGRF_GetIrqStatus() too late. */
-volatile uint16_t g_last_irq_status = 0;
-
-
-
-/*
-=========================================================
-TX HISTORY BUFFER
-=========================================================
-*/
-
-static uint8_t last_tx_frame[AX25_MAX_FRAME_SIZE];
-static uint16_t last_tx_len = 0;
-
-
-
-/*
-=========================================================
-RX SESSION STATS
-=========================================================
-*/
-
+static uint32_t stat_b1_received = 0;
+static uint32_t stat_b2_received = 0;
+static uint32_t stat_ack_received = 0;
+static uint32_t stat_nack_received = 0;
 static uint32_t stat_packets_ok = 0;
 static uint32_t stat_packets_bad_crc = 0;
 static uint32_t stat_packets_misaddressed = 0;
-static uint32_t stat_packets_stale_tx = 0;
-
-
 
 /*
 =========================================================
@@ -149,11 +104,20 @@ FORWARD DECLARATIONS
 
 static void Print_Hex_Bytes(const uint8_t *buf, uint16_t len);
 static void Print_Payload_ASCII(const uint8_t *buf, uint16_t start, uint16_t end);
-static bool Looks_Like_Stale_TX_Buffer(const uint8_t *buf, uint16_t len);
 static void Print_AX25_Fields(const char *label, const uint8_t *buf, uint16_t len);
+static void Parse_And_Print_Beacon1(const uint8_t *p, uint16_t plen);
+static void Parse_And_Print_Beacon2(const uint8_t *p, uint16_t plen);
 static void Process_Received_Frame(void);
+static void Print_Help(void);
 
+extern void SysTick_Init_CPU2(uint32_t sys_freq_hz);
+extern void CPU2_Delay_Ms(uint32_t ms);
+extern volatile uint32_t g_system_tick_ms;
 
+static uint32_t Get_Time_Ms(void)
+{
+    return g_system_tick_ms;
+}
 
 /*
 =========================================================
@@ -166,20 +130,16 @@ static void Print_Hex_Bytes(const uint8_t *buf, uint16_t len)
     for (uint16_t i = 0; i < len; i++)
     {
         uart2_printf("%02X ", buf[i]);
-
         if ((i + 1) % 16 == 0)
         {
             uart2_puts("\r\n");
         }
     }
-
     if (len % 16 != 0)
     {
         uart2_puts("\r\n");
     }
 }
-
-
 
 static void Print_Payload_ASCII(const uint8_t *buf, uint16_t start, uint16_t end)
 {
@@ -205,27 +165,6 @@ static void Print_Payload_ASCII(const uint8_t *buf, uint16_t start, uint16_t end
     uart2_puts(line);
 }
 
-
-
-static bool Looks_Like_Stale_TX_Buffer(const uint8_t *buf, uint16_t len)
-{
-    if (last_tx_len == 0)
-    {
-        return false;
-    }
-
-    uint16_t compare_len = (len < last_tx_len) ? len : last_tx_len;
-
-    if (compare_len < 8)
-    {
-        return false;
-    }
-
-    return (memcmp(buf, last_tx_frame, compare_len) == 0);
-}
-
-
-
 static void Print_AX25_Fields(const char *label, const uint8_t *buf, uint16_t len)
 {
     uart2_printf("\r\n--- %s FIELD BREAKDOWN (%u bytes) ---\r\n", label, len);
@@ -236,35 +175,17 @@ static void Print_AX25_Fields(const char *label, const uint8_t *buf, uint16_t le
         return;
     }
 
-    uart2_printf
-    (
-        "Start Flag : %02X %s\r\n",
-        buf[0],
-        (buf[0] == AX25_FLAG) ? "(OK, matches 0x7E)" : "(MISMATCH)"
-    );
+    uart2_printf("Start Flag : %02X %s\r\n",
+                 buf[0], (buf[0] == AX25_FLAG) ? "(OK, 0x7E)" : "(MISMATCH)");
 
-    char dest_cs[7];
-    char src_cs[7];
-
+    char dest_cs[7], src_cs[7];
     AX25_DecodeAddress(&buf[1], dest_cs);
     AX25_DecodeAddress(&buf[8], src_cs);
 
-    uart2_printf
-    (
-        "Dest       : %02X %02X %02X %02X %02X %02X %02X -> \"%s\"\r\n",
-        buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-        dest_cs
-    );
-
-    uart2_printf
-    (
-        "Src        : %02X %02X %02X %02X %02X %02X %02X -> \"%s\"\r\n",
-        buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14],
-        src_cs
-    );
-
-    uart2_printf("Control    : %02X\r\n", buf[15]);
-    uart2_printf("PID        : %02X\r\n", buf[16]);
+    uart2_printf("Dest       : \"%s\"\r\n", dest_cs);
+    uart2_printf("Src        : \"%s\"\r\n", src_cs);
+    uart2_printf("Control    : 0x%02X\r\n", buf[15]);
+    uart2_printf("PID        : 0x%02X\r\n", buf[16]);
 
     uint16_t payload_start = 17;
     uint16_t payload_end = (uint16_t)(len - 3);
@@ -272,9 +193,7 @@ static void Print_AX25_Fields(const char *label, const uint8_t *buf, uint16_t le
     if (payload_end > payload_start)
     {
         uint16_t plen = (uint16_t)(payload_end - payload_start);
-
         uart2_printf("Payload    : %u bytes\r\n", plen);
-
         Print_Hex_Bytes(&buf[payload_start], plen);
         Print_Payload_ASCII(buf, payload_start, payload_end);
     }
@@ -283,28 +202,130 @@ static void Print_AX25_Fields(const char *label, const uint8_t *buf, uint16_t le
         uart2_puts("Payload    : (none)\r\n");
     }
 
-    uart2_printf
-    (
-        "FCS/CRC    : %02X %02X (as sent: low-byte-first)\r\n",
-        buf[len - 3],
-        buf[len - 2]
-    );
-
-    uart2_printf
-    (
-        "End Flag   : %02X %s\r\n",
-        buf[len - 1],
-        (buf[len - 1] == AX25_FLAG) ? "(OK, matches 0x7E)" : "(MISMATCH)"
-    );
+    uart2_printf("FCS/CRC    : %02X %02X\r\n", buf[len - 3], buf[len - 2]);
+    uart2_printf("End Flag   : %02X %s\r\n",
+                 buf[len - 1], (buf[len - 1] == AX25_FLAG) ? "(OK, 0x7E)" : "(MISMATCH)");
 }
 
+/*
+=========================================================
+PARSERS FOR BEACON 1 (HK1) & BEACON 2 (HK2)
+=========================================================
+*/
 
+static void Parse_And_Print_Beacon1(const uint8_t *p, uint16_t plen)
+{
+    (void)plen;
+    const int16_t *v = (const int16_t *)p;
+    uint16_t footer = (uint16_t)(p[32] | (p[33] << 8));
+    stat_b1_received++;
+
+    uart2_puts("\r\n========================================================================\r\n");
+    uart2_printf("  >>> [GS RX] BEACON 1 #%lu: HOUSEKEEPING 1 (VOLTAGES & TEMPERATURES) <<<\r\n",
+                 (unsigned long)stat_b1_received);
+    uart2_puts("========================================================================\r\n");
+
+    uart2_printf("  [00] Battery Voltage   (ADC_BAT_MON)  : %3d.%02d V   (raw x100: %d)\r\n",
+                 v[0] / 100, (v[0] < 0 ? -v[0] : v[0]) % 100, v[0]);
+    uart2_printf("  [01] Total Solar Volt  (TOTAL_SOLAR_V): %3d.%02d V   (raw x100: %d)\r\n",
+                 v[1] / 100, (v[1] < 0 ? -v[1] : v[1]) % 100, v[1]);
+    uart2_printf("  [02] Raw Bus Voltage   (RAW_VOLT)     : %3d.%02d V   (raw x100: %d)\r\n",
+                 v[2] / 100, (v[2] < 0 ? -v[2] : v[2]) % 100, v[2]);
+
+    uart2_printf("  [03] Solar Panel 5     (SP5_VOLT)     : %3d.%02d V\r\n",
+                 v[3] / 100, (v[3] < 0 ? -v[3] : v[3]) % 100);
+    uart2_printf("  [04] Solar Panel 4     (SP4_VOLT)     : %3d.%02d V\r\n",
+                 v[4] / 100, (v[4] < 0 ? -v[4] : v[4]) % 100);
+    uart2_printf("  [05] Solar Panel 3     (SP3_VOLT)     : %3d.%02d V\r\n",
+                 v[5] / 100, (v[5] < 0 ? -v[5] : v[5]) % 100);
+    uart2_printf("  [06] Solar Panel 1     (SP1_VOLT)     : %3d.%02d V\r\n",
+                 v[6] / 100, (v[6] < 0 ? -v[6] : v[6]) % 100);
+    uart2_printf("  [07] Solar Panel 2     (SP2_VOLT)     : %3d.%02d V\r\n",
+                 v[7] / 100, (v[7] < 0 ? -v[7] : v[7]) % 100);
+
+    uart2_printf("  [08] Antenna Temp      (ANT_TEMP)     : %3d.%02d C   (raw x100: %d)\r\n",
+                 v[8] / 100, (v[8] < 0 ? -v[8] : v[8]) % 100, v[8]);
+    uart2_printf("  [09] Battery Temp      (BATT_TEMP)    : %3d.%02d C\r\n",
+                 v[9] / 100, (v[9] < 0 ? -v[9] : v[9]) % 100);
+    uart2_printf("  [10] BPB Temp          (TEMP_BPB)     : %3d.%02d C\r\n",
+                 v[10] / 100, (v[10] < 0 ? -v[10] : v[10]) % 100);
+    uart2_printf("  [11] Temperature 1     (TEMP1)        : %3d.%02d C\r\n",
+                 v[11] / 100, (v[11] < 0 ? -v[11] : v[11]) % 100);
+    uart2_printf("  [12] Temperature 5     (TEMP5)        : %3d.%02d C\r\n",
+                 v[12] / 100, (v[12] < 0 ? -v[12] : v[12]) % 100);
+    uart2_printf("  [13] Temperature 4     (TEMP4)        : %3d.%02d C\r\n",
+                 v[13] / 100, (v[13] < 0 ? -v[13] : v[13]) % 100);
+    uart2_printf("  [14] Temperature 3     (TEMP3)        : %3d.%02d C\r\n",
+                 v[14] / 100, (v[14] < 0 ? -v[14] : v[14]) % 100);
+    uart2_printf("  [15] Temperature 2     (TEMP2)        : %3d.%02d C\r\n",
+                 v[15] / 100, (v[15] < 0 ? -v[15] : v[15]) % 100);
+
+    uart2_printf("  [--] Footer: 0x%02X 0x%02X (0x%04X)   [VALID HK1]\r\n",
+                 p[32], p[33], footer);
+    uart2_puts("========================================================================\r\n");
+}
+
+static void Parse_And_Print_Beacon2(const uint8_t *p, uint16_t plen)
+{
+    (void)plen;
+    const int16_t *d = (const int16_t *)p;
+    uint16_t footer = (uint16_t)(p[36] | (p[37] << 8));
+    stat_b2_received++;
+
+    uart2_puts("\r\n========================================================================\r\n");
+    uart2_printf("  >>> [GS RX] BEACON 2 #%lu: HOUSEKEEPING 2 (CURRENTS & IMU/MAG SENSORS) <<<\r\n",
+                 (unsigned long)stat_b2_received);
+    uart2_puts("========================================================================\r\n");
+
+    uart2_printf("  [00] UNREG_I          : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[0] / 100, (d[0] < 0 ? -d[0] : d[0]) % 100, d[0]);
+    uart2_printf("  [01] SP4_I            : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[1] / 100, (d[1] < 0 ? -d[1] : d[1]) % 100, d[1]);
+    uart2_printf("  [02] MAIN_3V3_I       : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[2] / 100, (d[2] < 0 ? -d[2] : d[2]) % 100, d[2]);
+    uart2_printf("  [03] MISSION_3V3_I    : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[3] / 100, (d[3] < 0 ? -d[3] : d[3]) % 100, d[3]);
+    uart2_printf("  [04] SPT_I            : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[4] / 100, (d[4] < 0 ? -d[4] : d[4]) % 100, d[4]);
+    uart2_printf("  [05] 5V_I             : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[5] / 100, (d[5] < 0 ? -d[5] : d[5]) % 100, d[5]);
+    uart2_printf("  [06] SP2_I            : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[6] / 100, (d[6] < 0 ? -d[6] : d[6]) % 100, d[6]);
+    uart2_printf("  [07] SP1_I            : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[7] / 100, (d[7] < 0 ? -d[7] : d[7]) % 100, d[7]);
+    uart2_printf("  [08] RAW_I            : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[8] / 100, (d[8] < 0 ? -d[8] : d[8]) % 100, d[8]);
+    uart2_printf("  [09] SP5_I            : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[9] / 100, (d[9] < 0 ? -d[9] : d[9]) % 100, d[9]);
+    uart2_printf("  [10] BAT_I            : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[10] / 100, (d[10] < 0 ? -d[10] : d[10]) % 100, d[10]);
+    uart2_printf("  [11] SP3_I            : %2d.%03d A   (raw x100: %d)\r\n",
+                 d[11] / 100, (d[11] < 0 ? -d[11] : d[11]) % 100, d[11]);
+
+    uart2_printf("  [GYRO] X: %3d.%02d | Y: %3d.%02d | Z: %3d.%02d dps\r\n",
+                 d[12] / 100, (d[12] < 0 ? -d[12] : d[12]) % 100,
+                 d[13] / 100, (d[13] < 0 ? -d[13] : d[13]) % 100,
+                 d[14] / 100, (d[14] < 0 ? -d[14] : d[14]) % 100);
+
+    uart2_printf("  [MAG]  X: %2d.%03d | Y: %2d.%03d | Z: %2d.%03d Gauss\r\n",
+                 d[15] / 100, (d[15] < 0 ? -d[15] : d[15]) % 100,
+                 d[16] / 100, (d[16] < 0 ? -d[16] : d[16]) % 100,
+                 d[17] / 100, (d[17] < 0 ? -d[17] : d[17]) % 100);
+
+    uart2_printf("  [--] Footer: 0x%02X 0x%02X (0x%04X)   [VALID HK2]\r\n",
+                 p[36], p[37], footer);
+    uart2_puts("========================================================================\r\n");
+}
 
 /*
 =========================================================
 PROCESS A RECEIVED FRAME
 =========================================================
 */
+
+static uint8_t s_gs_prev_rx[AX25_MAX_FRAME_SIZE];
+static uint16_t s_gs_prev_len = 0;
+
 static void Process_Received_Frame(void)
 {
     uint16_t raw_len = (rx_frame_size > AX25_MAX_FRAME_SIZE)
@@ -314,71 +335,53 @@ static void Process_Received_Frame(void)
     uint8_t raw_copy[AX25_MAX_FRAME_SIZE];
     memcpy(raw_copy, (const void *)rx_frame_buffer, raw_len);
 
-    uart2_printf("\r\nRAW FRAME FROM RADIO (%u bytes):\r\n", raw_len);
-    Print_Hex_Bytes(raw_copy, raw_len);
+    /* Combine previous 200 bytes and current 200 bytes into a sliding stream buffer */
+    uint8_t stream_buf[AX25_MAX_FRAME_SIZE * 2];
+    uint16_t stream_len = 0;
 
-    if (Looks_Like_Stale_TX_Buffer(raw_copy, raw_len))
+    if (s_gs_prev_len > 0)
     {
-        stat_packets_stale_tx++;
-        uart2_puts("*** WARNING: raw bytes match our own last TX buffer ***\r\n");
+        memcpy(&stream_buf[0], s_gs_prev_rx, s_gs_prev_len);
+        stream_len += s_gs_prev_len;
     }
+    memcpy(&stream_buf[stream_len], raw_copy, raw_len);
+    stream_len += raw_len;
 
-    /* Descramble + NRZ-I decode + locate the flag-delimited frame inside
-       the fixed-length buffer (see protocol.c Protocol_ExtractFrame). */
+    memcpy(s_gs_prev_rx, raw_copy, raw_len);
+    s_gs_prev_len = raw_len;
+
     uint8_t decoded[AX25_MAX_FRAME_SIZE];
     uint16_t decoded_len = 0;
 
-    if (!Protocol_ExtractFrame(raw_copy, raw_len, decoded, sizeof(decoded), &decoded_len))
+    if (!Protocol_ExtractFrame(stream_buf, stream_len, decoded, sizeof(decoded), &decoded_len))
     {
-        uart2_puts("*** no valid flag-delimited frame found in this buffer - discarding ***\r\n");
+        /* Noise chunk - smoothly ignore */
         return;
     }
 
-    Print_AX25_Fields("DESCRAMBLED", decoded, decoded_len);
+    /* Reset history since valid frame boundary was consumed */
+    s_gs_prev_len = 0;
 
     bool crc1_ok = AX25_VerifyCRC_Method1(decoded, decoded_len) && (decoded_len >= 17);
+    uint16_t crc2_computed = 0, crc2_recv_le = 0, crc2_recv_be = 0;
+    bool crc2_ok = AX25_VerifyCRC_Method2(decoded, decoded_len, &crc2_computed, &crc2_recv_le, &crc2_recv_be);
 
-    uint16_t crc2_computed = 0;
-    uint16_t crc2_recv_le = 0;
-    uint16_t crc2_recv_be = 0;
-
-    bool crc2_ok = AX25_VerifyCRC_Method2(
-        decoded, decoded_len, &crc2_computed, &crc2_recv_le, &crc2_recv_be);
-
-    uart2_printf(
-        "\r\nCRC method 1 (reversed X-25, magic 0xF0B8) : %s\r\n",
-        crc1_ok ? "PASS" : "FAIL");
-
-    uart2_printf(
-        "CRC method 2 (direct CCITT-FALSE)         : %s (computed=0x%04X LE=0x%04X BE=0x%04X)\r\n",
-        crc2_ok ? "PASS" : "FAIL", crc2_computed, crc2_recv_le, crc2_recv_be);
-
-    if (!(crc1_ok || crc2_ok))
+    if (!(crc1_ok || crc2_ok) || decoded_len < 17)
     {
         stat_packets_bad_crc++;
-        uart2_puts("CRC CHECK FAILED (both methods) - DISCARDING FRAME\r\n");
         return;
     }
 
-    if (decoded_len < 17)
-    {
-        stat_packets_bad_crc++;
-        uart2_puts("FRAME TOO SHORT - DISCARDING\r\n");
-        return;
-    }
-
-    char dest_cs[7];
-    char src_cs[7];
-
+    char dest_cs[7], src_cs[7];
     AX25_DecodeAddress(&decoded[1], dest_cs);
     AX25_DecodeAddress(&decoded[8], src_cs);
 
-    uart2_printf("\r\nFRAME: DEST=%s SRC=%s\r\n", dest_cs, src_cs);
-
-    if (strcmp(dest_cs, GroundStationProfile.sourceCallsign) != 0)
+    /* Accept frames addressed to GROUND, CQ, or broadcast */
+    if (strcmp(dest_cs, GroundStationProfile.sourceCallsign) != 0 &&
+        strcmp(dest_cs, "CQ") != 0 &&
+        strcmp(dest_cs, "BEACON") != 0)
     {
         stat_packets_misaddressed++;
-        uart2_puts("NOT ADDRESSED TO US - IGNORING\r\n");
         return;
     }
 
@@ -386,26 +389,67 @@ static void Process_Received_Frame(void)
 
     uint16_t payload_start = 17;
     uint16_t payload_end = (uint16_t)(decoded_len - 3);
+    uint16_t plen = (payload_end > payload_start) ? (uint16_t)(payload_end - payload_start) : 0;
+    const uint8_t *p = &decoded[payload_start];
 
-    if (payload_end > payload_start)
+    /* ------------------------------------------------------------- */
+    /* 1. SATELLITE COMMAND RESPONSE: ACK (0xAA) / NACK (0x55)       */
+    /* ------------------------------------------------------------- */
+    if (plen == 1 && p[0] == 0xAA)
     {
-        uint16_t plen = (uint16_t)(payload_end - payload_start);
-        uart2_printf("\r\nPAYLOAD (%u bytes, ASCII where printable):\r\n", plen);
-
-        for (uint16_t i = 0; i < plen; i++)
-        {
-            uint8_t c = decoded[payload_start + i];
-            uart2_putc((c >= 32 && c <= 126) ? (char)c : '.');
-        }
-        uart2_puts("\r\n");
+        stat_ack_received++;
+        uart2_puts("\r\n=======================================================\r\n");
+        uart2_printf(" >>> [GS RX] SATELLITE COMMAND ACK RECEIVED (0xAA) #%lu <<<\r\n",
+                     (unsigned long)stat_ack_received);
+        uart2_puts(" SUCCESS: Satellite executed command (e.g. Camera Run)!\r\n");
+        uart2_puts("=======================================================\r\n");
+        return;
+    }
+    else if (plen == 1 && p[0] == 0x55)
+    {
+        stat_nack_received++;
+        uart2_puts("\r\n=======================================================\r\n");
+        uart2_printf(" >>> [GS RX] SATELLITE COMMAND NACK RECEIVED (0x55) #%lu <<<\r\n",
+                     (unsigned long)stat_nack_received);
+        uart2_puts(" WARNING: Satellite rejected command (camera not enabled / busy)!\r\n");
+        uart2_puts("=======================================================\r\n");
+        return;
     }
 
-    uart2_printf(
-        "\r\nSESSION STATS: %lu ok, %lu crc-fail, %lu not-for-us, %lu stale-tx, %lu timeouts, %lu rx-errors (crc=%lu hdr=%lu)\r\n",
-        (unsigned long)stat_packets_ok, (unsigned long)stat_packets_bad_crc,
-        (unsigned long)stat_packets_misaddressed, (unsigned long)stat_packets_stale_tx,
-        (unsigned long)stat_rx_timeouts, (unsigned long)stat_rx_errors,
-        (unsigned long)stat_rx_crc_errors, (unsigned long)stat_rx_header_errors);
+    /* ------------------------------------------------------------- */
+    /* 2. BEACON 1 (HK1: 34 Bytes, Footer 0xAA55)                    */
+    /* ------------------------------------------------------------- */
+    uint16_t f1 = (plen >= 34) ? (uint16_t)(p[32] | (p[33] << 8)) : 0;
+    uint16_t f1_be = (plen >= 34) ? (uint16_t)((p[32] << 8) | p[33]) : 0;
+    if (plen == 34 || f1 == 0xAA55 || f1_be == 0xAA55)
+    {
+        Parse_And_Print_Beacon1(p, plen);
+        return;
+    }
+
+    /* ------------------------------------------------------------- */
+    /* 3. BEACON 2 (HK2: 38 Bytes, Footer 0xBB66)                    */
+    /* ------------------------------------------------------------- */
+    uint16_t f2 = (plen >= 38) ? (uint16_t)(p[36] | (p[37] << 8)) : 0;
+    uint16_t f2_be = (plen >= 38) ? (uint16_t)((p[36] << 8) | p[37]) : 0;
+    if (plen == 38 || f2 == 0xBB66 || f2_be == 0xBB66)
+    {
+        Parse_And_Print_Beacon2(p, plen);
+        return;
+    }
+
+    /* ------------------------------------------------------------- */
+    /* 4. OTHER / ASCII / TELEMETRY BURST PACKETS                    */
+    /* ------------------------------------------------------------- */
+    uart2_printf("\r\n--- PACKET DECODED (%u bytes, from %s) ---\r\n", decoded_len, src_cs);
+    Print_AX25_Fields("PAYLOAD", decoded, decoded_len);
+    uart2_printf("TOTAL STATS: %lu OK (%lu B1, %lu B2, %lu ACK, %lu NACK) | %lu bad CRC\r\n",
+                 (unsigned long)stat_packets_ok,
+                 (unsigned long)stat_b1_received,
+                 (unsigned long)stat_b2_received,
+                 (unsigned long)stat_ack_received,
+                 (unsigned long)stat_nack_received,
+                 (unsigned long)stat_packets_bad_crc);
 }
 
 /*
@@ -416,191 +460,161 @@ RADIO CALLBACK FUNCTIONS
 
 void OnTxDone(void)
 {
-    uart2_puts("\r\nTX DONE\r\n");
     tx_busy = 0;
 }
-
-
 
 void OnTxTimeout(void)
 {
-    uart2_puts("\r\nTX TIMEOUT\r\n");
     tx_busy = 0;
 }
 
-
-
 void OnRxTimeout(void)
 {
-    stat_rx_timeouts++;
-    uart2_puts("[RX TIMEOUT] no signal detected this cycle\r\n");
     rx_timeout_flag = 1;
 }
 
-
-
 void OnRxError(void)
 {
-    stat_rx_errors++;
-
-    uint16_t irq_status = g_last_irq_status;
-
-    if (irq_status & IRQ_CRC_ERROR)
-    {
-        stat_rx_crc_errors++;
-    }
-
-    if (irq_status & IRQ_HEADER_ERROR)
-    {
-        stat_rx_header_errors++;
-    }
-
-    int16_t inst_rssi = SUBGRF_GetRssiInst();
-
-    uart2_printf
-    (
-        "[RX ERROR] IRQ=0x%04X RSSI=%d dBm %s%s%s%s\r\n",
-        irq_status,
-        inst_rssi,
-        (irq_status & IRQ_CRC_ERROR)      ? "CRC_ERROR " : "",
-        (irq_status & IRQ_HEADER_ERROR)   ? "HEADER_ERROR " : "",
-        (irq_status & IRQ_RX_TX_TIMEOUT)  ? "TIMEOUT " : "",
-        (irq_status & IRQ_SYNCWORD_VALID) ? "SYNCWORD_OK " : ""
-    );
-
     rx_error_flag = 1;
 }
 
-
-
 void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr)
 {
-    /* FIX: these must be uint8_t to match SUBGRF_GetRxBufferStatus()'s
-       actual signature (uint8_t *payloadLength, uint8_t *rxStartBufferPointer).
-       Passing int8_t* there was an incompatible-pointer-type warning and,
-       strictly speaking, undefined behavior - it happened to work here
-       only because both types are 1 byte wide on this target. */
-    uint8_t chipPayloadLen = 0, chipStartPtr = 0;
-    SUBGRF_GetRxBufferStatus(&chipPayloadLen, &chipStartPtr);
-    uart2_printf("CHIP BUFSTATUS: len=%u startPtr=%u\r\n", chipPayloadLen, chipStartPtr);
-
-    RadioPhyStatus_t st = SUBGRF_GetStatus();
-    uart2_printf("CHIP STATUS: mode=%d cmd=%d raw=0x%02X | buf[0]=0x%02X buf[1]=0x%02X buf[2]=0x%02X\r\n",
-                 st.Fields.ChipMode, st.Fields.CmdStatus, st.Value,
-                 payload[0], payload[1], payload[2]);
-
+    (void)rssi;
+    (void)snr;
     uint16_t copy_len = (size > AX25_MAX_FRAME_SIZE) ? AX25_MAX_FRAME_SIZE : size;
-
     memcpy((void *)rx_frame_buffer, payload, copy_len);
-
     rx_frame_size = copy_len;
-
-    uart2_printf
-    (
-        "\r\n[RX EVENT] %u bytes, RSSI=%d dBm, SNR=%d dB\r\n",
-        copy_len,
-        rssi,
-        snr
-    );
-
     rx_done_flag = 1;
 }
-
-
-
-/*
-=========================================================
-STM32WL SUBGHZ INTERRUPT HANDLER
-=========================================================
-*/
 
 extern SUBGHZ_HandleTypeDef hsubghz;
 
 void SUBGHZ_Radio_IRQHandler(void)
 {
-    g_last_irq_status = SUBGRF_GetIrqStatus();
     HAL_SUBGHZ_IRQHandler(&hsubghz);
 }
 
-
-
 /*
 =========================================================
-SEND COMMAND TO SATELLITE
-
-COMMAND FLOW:
-UART COMMAND -> AX25 FRAME CREATE -> G3RUH SCRAMBLE (inside
-Protocol_CreatePacket) -> GFSK TX
-
-TX goes through RadioApp_Send() instead of manually calling
-Radio.SetChannel()+Radio.Send(). RadioApp_Send() resets the
-SUBGHZ buffer base address and sets the TX channel internally,
-every call - identical to the satellite side's TX path. This
-keeps both ends symmetric so neither side can silently drift
-out of sync with what RadioApp_Init() originally configured.
+TELECOMMAND UPLINK ENGINE (437.375 MHz)
 =========================================================
 */
 
-static void Send_Command(CommandOpcode_t cmd)
+static void Send_13B_Command(const char *name, const uint8_t *cmd_13b)
 {
-    uint8_t payload[1];
-    payload[0] = (uint8_t)cmd;
-
     uint8_t frame[AX25_MAX_FRAME_SIZE];
+    uint16_t frame_len = Protocol_CreatePacket(frame, cmd_13b, 13, &GroundStationProfile);
+    if (frame_len == 0)
+    {
+        uart2_puts("ERROR: Failed to create AX.25 command frame\r\n");
+        return;
+    }
 
-    uint16_t frame_len = Protocol_CreatePacket
-    (
-        frame,
-        payload,
-        sizeof(payload),
-        &GroundStationProfile
-    );
+    uart2_printf("\r\n=======================================================\r\n");
+    uart2_printf(">>> TRANSMITTING %s COMMAND (13B, Opcode 0x%02X) <<<\r\n", name, cmd_13b[1]);
+    uart2_printf("    Uplink Freq: 437.375 MHz (+22 dBm GFSK 4800bd)\r\n");
+    uart2_printf("    Burst of 14 packets spanning satellite listening window\r\n");
+    uart2_puts("=======================================================\r\n");
 
+    for (int i = 0; i < 14; i++)
+    {
+        tx_busy = 1;
+        RadioApp_Send(frame, frame_len);
+
+        uint32_t timeout_cnt = TX_TIMEOUT_MS;
+        while (tx_busy != 0 && timeout_cnt > 0)
+        {
+            CPU2_Delay_Ms(1);
+            timeout_cnt--;
+        }
+
+        if (tx_busy != 0)
+        {
+            uart2_puts("TX TIMEOUT\r\n");
+            Radio.Standby();
+            tx_busy = 0;
+        }
+
+        uart2_printf("  [%2d/14] Uplink packet sent\r\n", i + 1);
+        CPU2_Delay_Ms(160);
+    }
+
+    uart2_puts(">>> UPLINK BURST COMPLETE -> SWITCHING TO 435.000 MHz (Listening for ACK/NACK)...\r\n");
+
+    /* Return to continuous RX listening on 435.000 MHz */
+    s_gs_prev_len = 0;
+    rx_done_flag = 0;
+    rx_timeout_flag = 0;
+    rx_error_flag = 0;
+    RadioApp_StartRx();
+}
+
+static void Send_Camera_Command(void)
+{
+    static const uint8_t cam_cmd[13] = CMD_CAMERA_COMMAND;
+    Send_13B_Command("CAMERA RUN", cam_cmd);
+}
+
+static void Send_ADCS_Command(void)
+{
+    static const uint8_t adcs_cmd[13] = CMD_ADCD_COMMAND;
+    Send_13B_Command("ADCS RUN", adcs_cmd);
+}
+
+static void Send_EPDM_Command(void)
+{
+    static const uint8_t epdm_cmd[13] = CMD_EPDM_COMMAND;
+    Send_13B_Command("EPDM RUN", epdm_cmd);
+}
+
+static void Send_Burst_Command(void)
+{
+    uint8_t payload[1] = { (uint8_t)CMD_REQUEST_BURST };
+    uint8_t frame[AX25_MAX_FRAME_SIZE];
+    uint16_t frame_len = Protocol_CreatePacket(frame, payload, sizeof(payload), &GroundStationProfile);
     if (frame_len == 0)
     {
         uart2_puts("AX25 CREATE ERROR\r\n");
         return;
     }
 
-    uart2_printf("\r\nAX25 FRAME LENGTH : %u bytes\r\n", frame_len);
+    uart2_puts("\r\n>>> TRANSMITTING BURST REQUEST (Opcode 0x01) on 437.375 MHz <<<\r\n");
 
-    /* Save frame for stale-buffer debug check (already scrambled at this point) */
-    memcpy(last_tx_frame, frame, frame_len);
-    last_tx_len = frame_len;
-
-    uart2_puts("\r\nTX ON AIR DATA (already scrambled by Protocol_CreatePacket):\r\n");
-
-    Print_Hex_Bytes(frame, frame_len);
-
-    Print_AX25_Fields("TX (SCRAMBLED)", frame, frame_len);
-
-    uart2_printf("\r\nTX COMMAND 0x%02X\r\n", cmd);
-
-    tx_busy = 1;
-
-    RadioApp_Send(frame, frame_len);
-
-    uint32_t start = HAL_GetTick();
-
-    while (tx_busy)
+    for (int i = 0; i < 14; i++)
     {
-        if ((HAL_GetTick() - start) > TX_TIMEOUT_MS)
+        tx_busy = 1;
+        RadioApp_Send(frame, frame_len);
+
+        uint32_t timeout_cnt = TX_TIMEOUT_MS;
+        while (tx_busy != 0 && timeout_cnt > 0)
         {
-            uart2_puts("TX TIMEOUT FORCE STOP\r\n");
+            CPU2_Delay_Ms(1);
+            timeout_cnt--;
+        }
+
+        if (tx_busy != 0)
+        {
+            uart2_puts("TX TIMEOUT\r\n");
             Radio.Standby();
             tx_busy = 0;
-            break;
         }
+
+        uart2_printf("  [%2d/14] Burst request packet sent\r\n", i + 1);
+        CPU2_Delay_Ms(160);
     }
 
-    uart2_puts("COMMAND TX COMPLETE\r\n");
+    uart2_puts(">>> SWITCHING TO 435.000 MHz (Listening for 100-packet burst)...\r\n");
+    s_gs_prev_len = 0;
+    rx_done_flag = 0;
+    rx_timeout_flag = 0;
+    rx_error_flag = 0;
+    RadioApp_StartRx();
 }
-
-
 
 /*
 =========================================================
-CASE INSENSITIVE STRING COMPARE
+STRING HELPERS & UART COMMAND LINE READER
 =========================================================
 */
 
@@ -610,29 +624,14 @@ static bool str_ieq(const char *a, const char *b)
     {
         char ca = *a;
         char cb = *b;
-
         if (ca >= 'a' && ca <= 'z') ca -= 32;
         if (cb >= 'a' && cb <= 'z') cb -= 32;
-
-        if (ca != cb)
-        {
-            return false;
-        }
-
+        if (ca != cb) return false;
         a++;
         b++;
     }
-
     return (*a == 0 && *b == 0);
 }
-
-
-
-/*
-=========================================================
-UART COMMAND LINE READER
-=========================================================
-*/
 
 static bool USART_TryReadLine(char *out, uint8_t max)
 {
@@ -653,16 +652,11 @@ static bool USART_TryReadLine(char *out, uint8_t max)
         {
             return false;
         }
-
         buffer[index] = 0;
-
         strncpy(out, buffer, max - 1);
         out[max - 1] = 0;
-
         index = 0;
-
         uart2_puts("\r\n");
-
         return true;
     }
 
@@ -674,7 +668,23 @@ static bool USART_TryReadLine(char *out, uint8_t max)
     return false;
 }
 
-
+static void Print_Help(void)
+{
+    uart2_puts("\r\n=======================================================\r\n");
+    uart2_puts("        STM32WL55 GROUND STATION TELECOMMANDS\r\n");
+    uart2_puts("=======================================================\r\n");
+    uart2_puts("  CAMERA / CAM  - Send 13B Camera Run Command (Opcode 0x04)\r\n");
+    uart2_puts("  ADCS          - Send 13B ADCS Subsystem Command (Opcode 0x03)\r\n");
+    uart2_puts("  EPDM          - Send 13B EPDM Payload Command (Opcode 0x05)\r\n");
+    uart2_puts("  BURST         - Request 100-packet Telemetry Burst (0x01)\r\n");
+    uart2_puts("  HELP / ?      - Display this help menu\r\n");
+    uart2_puts("-------------------------------------------------------\r\n");
+    uart2_puts("  Uplink   (TX) : 437.375 MHz (+22 dBm GFSK 4800bd)\r\n");
+    uart2_puts("  Downlink (RX) : 435.000 MHz (Continuous listening)\r\n");
+    uart2_puts("  Auto-Detects  : Beacon 1 (HK1 34B), Beacon 2 (HK2 38B),\r\n");
+    uart2_puts("                  Command ACK (0xAA) / NACK (0x55)\r\n");
+    uart2_puts("=======================================================\r\n");
+}
 
 /*
 =========================================================
@@ -685,34 +695,25 @@ MAIN FUNCTION
 int main(void)
 {
     /* MCU INITIALIZATION */
-
     SystemInit();
     HAL_Init();
+    SysTick_Init_CPU2(HAL_RCC_GetHCLK2Freq());
     uart2_init();
 
     uart2_puts("\r\n");
-    uart2_puts("================================\r\n");
-    uart2_puts(" STM32WL55 GROUND STATION\r\n");
-    uart2_puts(" AX25 + G3RUH + GFSK\r\n");
-    uart2_puts(" [rev3: SSID aligned + buf status type fix]\r\n");
-    uart2_puts(" UPLINK   : 437.375 MHz\r\n");
-    uart2_puts(" DOWNLINK : 435.000 MHz\r\n");
-    uart2_puts("================================\r\n");
+    uart2_puts("=======================================================\r\n");
+    uart2_puts("    STM32WL55 SATELLITE GROUND STATION (GS)\r\n");
+    uart2_puts("    Dual-Band: 437.375 MHz Uplink / 435.000 MHz Downlink\r\n");
+    uart2_puts("    AX.25 + G3RUH Scrambling + GFSK (4800 baud)\r\n");
+    uart2_puts("=======================================================\r\n");
 
     /* RADIO HARDWARE INIT */
-
     RBI_Init();
-
     MX_SUBGHZ_Init();
-
-    /* ENABLE SUBGHZ INTERRUPT */
 
     HAL_NVIC_SetPriority(SUBGHZ_Radio_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(SUBGHZ_Radio_IRQn);
-
     __enable_irq();
-
-    /* RADIO CALLBACK TABLE */
 
     RadioEvents_t events =
     {
@@ -723,149 +724,61 @@ int main(void)
         .RxError = OnRxError
     };
 
-    /* RADIO APPLICATION INIT */
-
     RadioApp_Init(&GroundStationProfile, &events);
+    RadioApp_StartRx();
 
-    uart2_puts("\r\nRADIO READY\r\n");
-    uart2_puts("Type COMMAND to request satellite burst\r\n");
-    uart2_puts("> ");
+    uart2_puts("RADIO ACTIVE: Listening for satellite beacons on 435.000 MHz...\r\n");
+    Print_Help();
+    uart2_puts("\r\nGS> ");
 
     char command[CMD_LINE_MAX];
 
-    /* MAIN LOOP */
-
+    /* MAIN EVENT LOOP */
     while (1)
     {
+        /* Process any incoming beacon or packet */
+        if (rx_done_flag)
+        {
+            rx_done_flag = 0;
+            Process_Received_Frame();
+            uart2_puts("\r\nGS> ");
+        }
+
+        if (rx_timeout_flag || rx_error_flag)
+        {
+            rx_timeout_flag = 0;
+            rx_error_flag = 0;
+        }
+
+        /* Check for user command entry */
         if (USART_TryReadLine(command, sizeof(command)))
         {
-            if (str_ieq(command, "COMMAND"))
+            if (str_ieq(command, "CAMERA") || str_ieq(command, "CAM"))
             {
-                uart2_puts("\r\nCOMMAND ACCEPTED\r\n");
-
-                stat_packets_ok = 0;
-                stat_packets_bad_crc = 0;
-                stat_packets_misaddressed = 0;
-                stat_packets_stale_tx = 0;
-                stat_rx_timeouts = 0;
-                stat_rx_errors = 0;
-                stat_rx_crc_errors = 0;
-                stat_rx_header_errors = 0;
-
-                Send_Command(CMD_REQUEST_BURST);
-
-                uart2_puts("\r\nLISTENING 435 MHz...\r\n");
-
-                rx_done_flag = 0;
-                rx_timeout_flag = 0;
-                rx_error_flag = 0;
-
-                /* Enable RX interrupt BEFORE RX */
-
-                SUBGRF_SetDioIrqParams
-                (
-                    IRQ_RX_DONE | IRQ_RX_TX_TIMEOUT | IRQ_CRC_ERROR | IRQ_HEADER_ERROR,
-                    IRQ_RX_DONE | IRQ_RX_TX_TIMEOUT | IRQ_CRC_ERROR | IRQ_HEADER_ERROR,
-                    IRQ_RADIO_NONE,
-                    IRQ_RADIO_NONE
-                );
-
-                /* RadioApp_StartRx() resets the SUBGHZ buffer base
-                   address, sets the RX channel, and arms Rx(0) - all
-                   in one place, identical to every later re-arm below.
-                   This is the fix for the ground station reading stale
-                   bytes left over from a previous TX/RX cycle. */
-                RadioApp_StartRx();
-
-                memset((void*)rx_frame_buffer, 0xAA, sizeof(rx_frame_buffer));
-                RadioApp_StartRx();
-
-                uint32_t start = HAL_GetTick();
-                uint32_t last_event = start;
-                uint32_t last_heartbeat = start;
-
-                while ((HAL_GetTick() - start) < RX_SESSION_MS)
-                {
-                    if (rx_done_flag)
-                    {
-                        rx_done_flag = 0;
-                        last_event = HAL_GetTick();
-                        last_heartbeat = last_event;
-
-                        Process_Received_Frame();
-
-                        /* resets buffer base address every re-arm too */
-                        RadioApp_ResumeRx();
-                    }
-
-                    if (rx_timeout_flag || rx_error_flag)
-                    {
-                        rx_timeout_flag = 0;
-                        rx_error_flag = 0;
-                        last_event = HAL_GetTick();
-                        last_heartbeat = last_event;
-
-                        RadioApp_ResumeRx();
-                    }
-
-                    if ((HAL_GetTick() - last_heartbeat) > RX_HEARTBEAT_MS)
-                    {
-                        last_heartbeat = HAL_GetTick();
-
-                        uart2_printf
-                        (
-                            "... still listening (%lus elapsed, %lu ok / %lu crc-fail / %lu rx-errors / %lu timeouts so far)\r\n",
-                            (unsigned long)((HAL_GetTick() - start) / 1000UL),
-                            (unsigned long)stat_packets_ok,
-                            (unsigned long)stat_packets_bad_crc,
-                            (unsigned long)stat_rx_errors,
-                            (unsigned long)stat_rx_timeouts
-                        );
-                    }
-
-                    if ((HAL_GetTick() - last_event) > RX_WATCHDOG_MS)
-                    {
-                        uart2_puts("\r\nRX watchdog: no events for a while - re-arming radio\r\n");
-
-                        Radio.Standby();
-
-                        /* resets buffer base address too, same as every
-                           other re-arm point */
-                        RadioApp_ResumeRx();
-
-                        SUBGRF_SetDioIrqParams
-                        (
-                            IRQ_RX_DONE | IRQ_RX_TX_TIMEOUT | IRQ_CRC_ERROR | IRQ_HEADER_ERROR,
-                            IRQ_RX_DONE | IRQ_RX_TX_TIMEOUT | IRQ_CRC_ERROR | IRQ_HEADER_ERROR,
-                            IRQ_RADIO_NONE,
-                            IRQ_RADIO_NONE
-                        );
-
-                        last_event = HAL_GetTick();
-                    }
-                }
-
-                Radio.Standby();
-
-                uart2_printf
-                (
-                    "\r\nRX SESSION COMPLETE: %lu ok, %lu crc-fail, %lu not-for-us, %lu stale-tx, %lu timeouts, %lu rx-errors (crc=%lu hdr=%lu)\r\n",
-                    (unsigned long)stat_packets_ok,
-                    (unsigned long)stat_packets_bad_crc,
-                    (unsigned long)stat_packets_misaddressed,
-                    (unsigned long)stat_packets_stale_tx,
-                    (unsigned long)stat_rx_timeouts,
-                    (unsigned long)stat_rx_errors,
-                    (unsigned long)stat_rx_crc_errors,
-                    (unsigned long)stat_rx_header_errors
-                );
+                Send_Camera_Command();
+            }
+            else if (str_ieq(command, "ADCS"))
+            {
+                Send_ADCS_Command();
+            }
+            else if (str_ieq(command, "EPDM"))
+            {
+                Send_EPDM_Command();
+            }
+            else if (str_ieq(command, "BURST") || str_ieq(command, "COMMAND"))
+            {
+                Send_Burst_Command();
+            }
+            else if (str_ieq(command, "HELP") || str_ieq(command, "?"))
+            {
+                Print_Help();
             }
             else
             {
-                uart2_printf("UNKNOWN COMMAND : %s\r\n", command);
+                uart2_printf("UNKNOWN COMMAND: \"%s\". Type HELP for available commands.\r\n", command);
             }
 
-            uart2_puts("\r\n> ");
+            uart2_puts("\r\nGS> ");
         }
     }
 

@@ -30,7 +30,7 @@ if(CONFIG_ARCH_BOARD_FLASH_MOUNT)
   list(APPEND SRCS stm32_flash.c)
 endif()
 
-if(CONFIG_SPI_DRIVER)
+if(CONFIG_SPI)
   list(APPEND SRCS stm32_spi.c)
 endif()
 

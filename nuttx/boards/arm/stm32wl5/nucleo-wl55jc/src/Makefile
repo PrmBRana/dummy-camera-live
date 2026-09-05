@@ -26,7 +26,7 @@ CSRCS = stm32_boot.c stm32_leds.c
 
 CSRCS-$(CONFIG_ARCH_BUTTONS) += stm32_buttons.c
 CSRCS-$(CONFIG_ARCH_BOARD_FLASH_MOUNT) += stm32_flash.c
-CSRCS-$(CONFIG_SPI_DRIVER) += stm32_spi.c
+CSRCS-$(CONFIG_SPI) += stm32_spi.c
 CSRCS-$(CONFIG_ARCH_BOARD_IPCC) += stm32_ipcc.c
 
 ifeq ($(CONFIG_VIDEO_FB),y)

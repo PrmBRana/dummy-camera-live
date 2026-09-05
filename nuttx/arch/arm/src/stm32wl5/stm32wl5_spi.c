@@ -405,6 +405,7 @@ static struct stm32wl5_spidev_s g_spi2s2dev =
   .txch     = 0,
 #  endif
 #endif
+  .lock     = NXMUTEX_INITIALIZER,
 };
 #endif
 
@@ -516,10 +517,17 @@ static inline void spi_putreg8(struct stm32wl5_spidev_s *priv,
 
 static inline uint16_t spi_readword(struct stm32wl5_spidev_s *priv)
 {
+  uint32_t timeout = 500000;
+
   /* Wait until the receive buffer is not empty */
 
   while ((spi_getreg(priv, STM32WL5_SPI_SR_OFFSET) & SPI_SR_RXNE) == 0)
     {
+      if (--timeout == 0)
+        {
+          spierr("ERROR: SPI RXNE timeout\n");
+          return 0xffff;
+        }
     }
 
   /* Then return the received byte */
@@ -566,10 +574,17 @@ static inline uint16_t spi_readword(struct stm32wl5_spidev_s *priv)
 static inline void spi_writeword(struct stm32wl5_spidev_s *priv,
                                  uint16_t word)
 {
+  uint32_t timeout = 500000;
+
   /* Wait until the transmit buffer is empty */
 
   while ((spi_getreg(priv, STM32WL5_SPI_SR_OFFSET) & SPI_SR_TXE) == 0)
     {
+      if (--timeout == 0)
+        {
+          spierr("ERROR: SPI TXE timeout\n");
+          return;
+        }
     }
 
   /* Then send the word */

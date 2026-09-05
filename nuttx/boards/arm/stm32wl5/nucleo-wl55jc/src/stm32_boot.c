@@ -43,6 +43,8 @@
 
 #include <arch/board/board.h>
 
+#include <nuttx/mtd/mtd.h>
+
 #ifdef CONFIG_VIDEO_FB
 #include <nuttx/video/fb.h>
 #endif
@@ -53,6 +55,14 @@
 
 #include "arm_internal.h"
 #include "nucleo-wl55jc.h"
+
+#if defined(CONFIG_ADC_ADS7953)
+#include <nuttx/analog/ads7953.h>
+#endif
+
+#if defined(CONFIG_STM32WL5_SPI2S2)
+extern struct spi_dev_s *g_spi2;
+#endif
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -82,6 +92,125 @@
  *   initialized.
  *
  ****************************************************************************/
+#ifdef CONFIG_MTD_M25P
+
+static int stm32wl5_mt25q_initialize(void)
+{
+  struct spi_dev_s *spi;
+  struct mtd_dev_s *mtd;
+  uint8_t id[3] = {0};
+  int ret;
+
+  syslog(LOG_INFO, "Initializing external MT25Q NOR Flash...\n");
+
+  /* Initialize SPI1 */
+
+  spi = stm32wl5_spibus_initialize(1);
+  if (spi == NULL)
+    {
+      syslog(LOG_ERR, "ERROR: SPI1 initialization failed\n");
+      return -ENODEV;
+    }
+
+  /* Query JEDEC ID directly over SPI1 (RDID 0x9F) */
+
+  SPI_LOCK(spi, true);
+  SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), true);
+  SPI_SEND(spi, 0x9f);
+  id[0] = SPI_SEND(spi, 0xff); /* Manufacturer ID (0x20 = Micron) */
+  id[1] = SPI_SEND(spi, 0xff); /* Memory Type (0xBA = MT25QL 3V, 0xBB = MT25QU 1.8V) */
+  id[2] = SPI_SEND(spi, 0xff); /* Capacity (0x21 = 1 Gbit / 128 MB) */
+  SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), false);
+  SPI_LOCK(spi, false);
+
+  syslog(LOG_INFO, "MT25Q JEDEC ID: Mfg=0x%02X, Type=0x%02X, Cap=0x%02X\n",
+         id[0], id[1], id[2]);
+
+  if (id[0] == 0x20 && (id[1] == 0xba || id[1] == 0xbb) && id[2] == 0x21)
+    {
+      syslog(LOG_INFO, "Detected Micron MT25QL01G (1 Gbit / 128 MB)\n");
+    }
+  else
+    {
+      syslog(LOG_WARNING,
+             "WARNING: Unexpected JEDEC ID (check SPI wiring/power)\n");
+    }
+
+  /* Bind SPI1 to M25P/MT25Q driver */
+
+  mtd = m25p_initialize(spi);
+  if (mtd == NULL)
+    {
+      syslog(LOG_ERR, "ERROR: m25p_initialize() failed\n");
+      return -ENODEV;
+    }
+
+  syslog(LOG_INFO, "MT25Q MTD initialized successfully\n");
+
+    /* Now initialize the MTD partitions */
+  #ifdef CONFIG_MTD_PARTITION
+  /* MT25Q Page size is 256 bytes (1 MTD block = 256 bytes) */
+  #define MTD_BLOCK_SIZE      256
+
+  /* DIE 0: Housekeeping (HK) - 32 MB */
+  /* ADC1 temperature and voltage health for beacon  */
+
+  #define HK1_START_ADDR       0x00000000
+  #define HK1_SIZE             (32 * 1024 * 1024) /* 32 MB = 33, 554, 432 bytes */
+  #define HK1_START_BLOCK      (HK1_START_ADDR / MTD_BLOCK_SIZE) /* Block 0 */
+  #define HK1_NUM_BLOCKS       (HK1_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
+
+  /* ADC2: current information of stallite and IMU data  */
+  #define HK2_START_ADDR       0x02000000
+  #define HK2_SIZE             (32 * 1024 * 1024)
+  #define HK2_START_BLOCK      (HK2_START_ADDR / MTD_BLOCK_SIZE) /* Block 0 */
+  #define HK2_NUM_BLOCKS       (HK2_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
+
+  /* DIE 1: Camera Images - 64 MB */
+  #define CAM_START_ADDR      0x04000000                       /* 64 MB offset */
+  #define CAM_SIZE            (64 * 1024 * 1024)
+  #define CAM_START_BLOCK     (CAM_START_ADDR / MTD_BLOCK_SIZE) /* Block 262144 */
+  #define CAM_NUM_BLOCKS      (CAM_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
+
+  struct mtd_dev_s *part_hk;
+  struct mtd_dev_s *part_cam;
+
+  /* 1. Register Die 0 as /dev/hk (Full 32 MB) */
+  /*HK1 ADC1 partition*/
+  part_hk = mtd_partition(mtd, HK1_START_BLOCK, HK1_NUM_BLOCKS);
+  if (part_hk != NULL)
+    {
+      register_mtddriver("/dev/hk1", part_hk, 0666, NULL);
+      syslog(LOG_INFO, "Registered /dev/hk1 (32 MB - Die 0)\n");
+    }
+  /*HK2 ADC2 partition*/
+  part_hk = mtd_partition(mtd, HK2_START_BLOCK, HK2_NUM_BLOCKS);
+  if (part_hk != NULL)
+    {
+      register_mtddriver("/dev/hk2", part_hk, 0666, NULL);
+      syslog(LOG_INFO, "Registered /dev/hk2 (32 MB - Die 0)\n");
+    }
+  /* 2. Register Die 1 as /dev/camera (Full 64 MB) */
+  part_cam = mtd_partition(mtd, CAM_START_BLOCK, CAM_NUM_BLOCKS);
+  if (part_cam != NULL)
+    {
+      register_mtddriver("/dev/camera", part_cam, 0666, NULL);
+      syslog(LOG_INFO, "Registered /dev/camera (64 MB - Die 1)\n");
+    }
+
+  printf("MT25Q Flash Partitions:\n");
+  printf("  /dev/hk1:    Start Block: %d, Num Blocks: %d (Size: %d MB)\n",
+         HK1_START_BLOCK, HK1_NUM_BLOCKS, HK1_SIZE / (1024 * 1024));
+  printf("  /dev/hk2:    Start Block: %d, Num Blocks: %d (Size: %d MB)\n",
+         HK2_START_BLOCK, HK2_NUM_BLOCKS, HK2_SIZE / (1024 * 1024));
+  printf("  /dev/camera: Start Block: %d, Num Blocks: %d (Size: %d MB)\n",
+         CAM_START_BLOCK, CAM_NUM_BLOCKS, CAM_SIZE / (1024 * 1024));
+#endif
+
+  return OK;
+}
+
+#endif
 
 void stm32wl5_board_initialize(void)
 {
@@ -178,10 +307,58 @@ void board_late_initialize(void)
     }
 #endif
 
-#if defined(CONFIG_ARCH_BOARD_ENABLE_CPU2)
-  /* Start second CPU */
+#if defined(CONFIG_MTD_M25P)
+  /* Initialize external MT25Q NOR flash and partitions */
 
+  ret = stm32wl5_mt25q_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32wl5_mt25q_initialize() failed: %d\n", ret);
+    }
+#endif
+
+#if defined(CONFIG_ARCH_BOARD_ENABLE_CPU2)
+  /* Start second CPU (Cortex-M0+) */
+
+  /* Ensure CPU2 peripheral clocks for SRAM2, IPCC, and GPIOA/B/C are pre-enabled */
+  modifyreg32(0x58000150, 0, (1 << 0) | (1 << 25)); /* C2AHB3ENR: IPCCEN | SRAM2EN */
+  modifyreg32(0x5800014c, 0, (1 << 0) | (1 << 1) | (1 << 2)); /* C2AHB2ENR: GPIOA/B/C */
+
+  printf("[SYSTEM] Booting Cortex-M0+ (CPU2) at 0x08032000 (M4: 200KB, M0+: 56KB)...\n");
+  fflush(stdout);
+  up_mdelay(10);
   stm32wl5_pwr_boot_c2();
+#endif
+
+#if defined(CONFIG_STM32WL5_SPI2S2) && defined(CONFIG_ADC_ADS7953)
+  /* Initialize ADS7953 ADC1 and ADC2 on SPI2 */
+
+  if (g_spi2 != NULL)
+    {
+      ret = ads7953_register("/dev/adc0", g_spi2, SPIDEV_USER(0));
+      if (ret < 0)
+        {
+          printf("ERROR: ads7953_register(/dev/adc0) failed: %d\n", ret);
+        }
+      else
+        {
+          printf("ADS7953 ADC1 registered at /dev/adc0\n");
+        }
+
+      ret = ads7953_register("/dev/adc1", g_spi2, SPIDEV_USER(1));
+      if (ret < 0)
+        {
+          printf("ERROR: ads7953_register(/dev/adc1) failed: %d\n", ret);
+        }
+      else
+        {
+          printf("ADS7953 ADC2 registered at /dev/adc1\n");
+        }
+    }
+  else
+    {
+      printf("ERROR: g_spi2 is NULL\n");
+    }
 #endif
 
   UNUSED(ret);

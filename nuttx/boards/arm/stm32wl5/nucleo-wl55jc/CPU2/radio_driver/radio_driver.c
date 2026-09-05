@@ -243,8 +243,6 @@ uint8_t SUBGRF_GetPayload(uint8_t *buffer, uint8_t *size, uint8_t maxSize)
 
     SUBGRF_GetRxBufferStatus(size, &offset);
 
-    uart2_printf("RX Buffer: size=%u offset=%u\r\n", *size, offset);
-
     if (*size > maxSize)
     {
         return 1;
@@ -259,85 +257,25 @@ void SUBGRF_SendPayload(uint8_t *payload,
                         uint8_t size,
                         uint32_t timeout)
 {
-
-    RadioPhyStatus_t status;
-    uint16_t irq;
-
-
-    uart2_puts("ENTER SendPayload\r\n");
-
-
     /*
      * Put payload into radio buffer
      */
-
     SUBGRF_SetPayload(payload, size);
-
-
-    uart2_puts("PAYLOAD SET OK\r\n");
-
-
 
     /*
      * Enable TX interrupts
      */
-
     SUBGRF_SetDioIrqParams(
-
-        IRQ_TX_DONE |
-        IRQ_RX_TX_TIMEOUT,
-
-        IRQ_TX_DONE |
-        IRQ_RX_TX_TIMEOUT,
-
+        IRQ_TX_DONE | IRQ_RX_TX_TIMEOUT,
+        IRQ_TX_DONE | IRQ_RX_TX_TIMEOUT,
         IRQ_RADIO_NONE,
-
         IRQ_RADIO_NONE
     );
-
-
-    uart2_puts("IRQ CONFIG OK\r\n");
-
-
 
     /*
      * Start TX
      */
-
     SUBGRF_SetTx(timeout);
-
-
-    uart2_puts("TX COMMAND SENT\r\n");
-
-
-
-    /*
-     * Read radio state
-     */
-
-    status = SUBGRF_GetStatus();
-
-
-    uart2_printf(
-        "Mode=%d Cmd=%d\r\n",
-        status.Fields.ChipMode,
-        status.Fields.CmdStatus);
-
-
-
-    /*
-     * Read IRQ status
-     */
-
-    irq = SUBGRF_GetIrqStatus();
-
-
-    uart2_printf(
-        "IRQ STATUS=0x%04X\r\n",
-        irq
-    );
-
-
 }
 
 
@@ -437,7 +375,6 @@ void SUBGRF_SetSleep( SleepParams_t sleepConfig )
     uint8_t value = ( ( ( uint8_t )sleepConfig.Fields.WarmStart << 2 ) |
                       ( ( uint8_t )sleepConfig.Fields.Reset << 1 ) |
                       ( ( uint8_t )sleepConfig.Fields.WakeUpRTC ) );
-    uart2_puts("SUBGRF_SetSleep\r\n");
     SUBGRF_WriteCommand( RADIO_SET_SLEEP, &value, 1 );
     OperatingMode = MODE_SLEEP;
 }
@@ -898,13 +835,6 @@ void SUBGRF_SetPacketParams( PacketParams_t *packetParams )
         buf[7] = crcVal;
         buf[8] = packetParams->Params.Gfsk.DcFree;
 
-        /* DIAGNOSTIC: print the exact byte written to PacketParam7 (CRC
-           type) on the real hardware, right before it's sent. This
-           removes all guesswork about what the SX126x is actually being
-           told, since IRQ_CRC_ERROR is still firing identically even
-           after forcing crcVal=0x00 in software. */
-        uart2_printf("SetPacketParams: CrcLength enum=%d -> crcVal byte=0x%02X\r\n",
-                     (int)packetParams->Params.Gfsk.CrcLength, crcVal);
         break;
     case PACKET_TYPE_BPSK:
         n = 1;
@@ -924,13 +854,6 @@ void SUBGRF_SetPacketParams( PacketParams_t *packetParams )
         return;
     }
     SUBGRF_WriteCommand( RADIO_SET_PACKETPARAMS, buf, n );
-    uart2_printf("\n===== GFSK Packet Params =====\r\n");
-    uart2_printf("HeaderType     = %d\r\n", packetParams->Params.Gfsk.HeaderType);
-    uart2_printf("PayloadLength  = %d\r\n", packetParams->Params.Gfsk.PayloadLength);
-    uart2_printf("CRC enum       = %d\r\n", packetParams->Params.Gfsk.CrcLength);
-    uart2_printf("DC Free        = %d\r\n", packetParams->Params.Gfsk.DcFree);
-    uart2_printf("SyncWordLength = %d\r\n", packetParams->Params.Gfsk.SyncWordLength);
-    uart2_printf("==============================\r\n");
 }
 
 void SUBGRF_SetCadParams( RadioLoRaCadSymbols_t cadSymbolNum, uint8_t cadDetPeak, uint8_t cadDetMin, RadioCadExitModes_t cadExitMode, uint32_t cadTimeout )
@@ -1111,19 +1034,9 @@ void SUBGRF_WriteCommand(SUBGHZ_RadioSetCmd_t Command,
                          uint8_t *pBuffer,
                          uint16_t Size)
 {
-    uart2_puts("W1\r\n");
-
     CRITICAL_SECTION_BEGIN();
-
-    uart2_puts("W2\r\n");
-
     HAL_SUBGHZ_ExecSetCmd(&hsubghz, Command, pBuffer, Size);
-
-    uart2_puts("W3\r\n");
-
     CRITICAL_SECTION_END();
-
-    uart2_puts("W4\r\n");
 }
 
 void SUBGRF_ReadCommand( SUBGHZ_RadioGetCmd_t Command, uint8_t *pBuffer,
@@ -1148,6 +1061,7 @@ void SUBGRF_SetSwitch( uint8_t paSelect, RFState_t rxtx )
         if (paSelect == RFO_HP)
         {
             state = RBI_SWITCH_RFO_HP;
+            Radio_SMPS_Set(SMPS_DRIVE_SETTING_MAX);
         }
     }
     else
@@ -1208,9 +1122,6 @@ uint32_t SUBGRF_GetRadioWakeUpTime( void )
 void HAL_SUBGHZ_TxCpltCallback(SUBGHZ_HandleTypeDef *hsubghz)
 {
     (void)hsubghz;
-
-    uart2_puts("### HAL TX COMPLETE ###\r\n");
-
     RadioOnDioIrqCb(IRQ_TX_DONE);
 }
 

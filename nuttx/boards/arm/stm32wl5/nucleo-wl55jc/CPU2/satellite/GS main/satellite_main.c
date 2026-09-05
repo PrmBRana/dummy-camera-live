@@ -25,7 +25,7 @@ const RadioConfig_t SatelliteProfile = {
     .isSatelliteMode = true
 };
 
-#define BURST_PACKET_COUNT  50
+#define BURST_PACKET_COUNT  100
 #define BEACON_INTERVAL_MS  5000
 #define TX_TIMEOUT_MS       1000
 
@@ -46,31 +46,21 @@ volatile uint8_t rx_error_flag = 0;
 static uint8_t last_tx_scrambled[AX25_MAX_FRAME_SIZE];
 static uint16_t last_tx_len = 0;
 static uint32_t last_beacon_tick_ms = 0;
+static uint32_t last_burst_finish_time = 0;
 
 /* Interrupt Status Callbacks */
 void OnTxDone(void) { tx_busy = 0; }
 void OnTxTimeout(void) { uart2_puts("TX TIMEOUT ERROR\r\n"); tx_busy = 0; }
-
-void OnRxTimeout(void)
-{
-    uart2_puts("*** PACKET RECEIVED: NO (RX timeout, no signal) ***\r\n");
-    rx_timeout_flag = 1;
-}
-
-void OnRxError(void)
-{
-    uart2_puts("RX ERROR (CRC/sync fail at radio level)\r\n");
-    uart2_puts("*** PACKET RECEIVED: NO (radio-level RX error) ***\r\n");
-    rx_error_flag = 1;
-}
+void OnRxTimeout(void) { rx_timeout_flag = 1; uart2_puts("[SAT RX TIMEOUT]\r\n"); }
+void OnRxError(void) { rx_error_flag = 1; uart2_puts("[SAT RX ERROR]\r\n"); }
 
 void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr) {
+    (void)rssi;
+    (void)snr;
+    uart2_printf("[SAT RX DONE: %u bytes, rssi=%d]\r\n", size, (int)rssi);
     uint16_t copy_len = (size < AX25_MAX_FRAME_SIZE) ? size : AX25_MAX_FRAME_SIZE;
     memcpy((void *)rx_frame_buffer, payload, copy_len);
     rx_frame_size = copy_len;
-    char dbg[64];
-    snprintf(dbg, sizeof(dbg), "RX DONE: %u bytes, RSSI=%d dBm, SNR=%d dB\r\n", copy_len, rssi, snr);
-    uart2_puts(dbg);
     rx_done_flag = 1;
 }
 
@@ -151,25 +141,34 @@ static void Print_AX25_Fields(const char *label, const uint8_t *buf, uint16_t le
     uart2_puts(line);
 }
 
-/* All TX goes through RadioApp_Send() - same shared arm sequence as
-   RX. No direct Radio.* calls anywhere in this file. */
+extern void SysTick_Init_CPU2(uint32_t sys_freq_hz);
+extern void CPU2_Delay_Ms(uint32_t ms);
+extern volatile uint32_t g_system_tick_ms;
+
+static uint32_t Get_Time_Ms(void) {
+    return g_system_tick_ms;
+}
+
+/* All TX goes through RadioApp_Send() */
 static bool Radio_Send_And_Wait(uint8_t *buffer, uint16_t size, uint32_t timeout_ms) {
     tx_busy = 1;
     RadioApp_Send(buffer, size);
 
-    uint32_t start_ms = HAL_GetTick();
+    uint32_t start_ms = Get_Time_Ms();
     while (tx_busy != 0) {
-        if ((HAL_GetTick() - start_ms) > timeout_ms) {
+        if ((Get_Time_Ms() - start_ms) > timeout_ms) {
             uart2_puts("ERROR: TX timeout\r\n");
+            Radio.Standby();
             tx_busy = 0;
             return false;
         }
+        CPU2_Delay_Ms(1);
     }
     return true;
 }
 
-/* 50x Telemetry Burst Stream Routine */
-static void Transmit_Burst_50(void) {
+/* 100x Telemetry Burst Stream Routine */
+static void Transmit_Burst_100(void) {
     uint8_t tx_data[90] = "Namaste Everyone! From Antarikchya Nepal. S2S-2 CubeSat Beacon Communication Test";
 
     uint8_t frame_buffer[AX25_MAX_FRAME_SIZE];
@@ -190,11 +189,12 @@ static void Transmit_Burst_50(void) {
 
     uint32_t sent_ok = 0, sent_timeout = 0;
     for (int i = 0; i < BURST_PACKET_COUNT; i++) {
-        bool ok = Radio_Send_And_Wait(frame_buffer, frame_size, TX_TIMEOUT_MS);
+        bool ok = Radio_Send_And_Wait(frame_buffer, frame_size, 3000);
         if (ok) sent_ok++; else sent_timeout++;
         char pkt_msg[48];
-        snprintf(pkt_msg, sizeof(pkt_msg), " TX packet %2d/%d : %s\r\n", i + 1, BURST_PACKET_COUNT, ok ? "sent OK" : "TIMEOUT");
+        snprintf(pkt_msg, sizeof(pkt_msg), " TX packet %3d/%d : %s\r\n", i + 1, BURST_PACKET_COUNT, ok ? "sent OK" : "TIMEOUT");
         uart2_puts(pkt_msg);
+        CPU2_Delay_Ms(25);
     }
 
     char done_msg[96];
@@ -202,16 +202,84 @@ static void Transmit_Burst_50(void) {
     uart2_puts(done_msg);
 }
 
+/* ============================================================
+ * CW / MORSE CODE BEACON ("S2S2BEA")
+ * ============================================================ */
+#define MORSE_DOT_MS     80   /* Standard ~15 WPM dot timing */
+#define MORSE_DASH_MS   (MORSE_DOT_MS * 3)
+
+static void CW_Tone_Init(void) {
+    SUBGRF_SetStandby(STDBY_XOSC);
+    CPU2_Delay_Ms(10);
+    SUBGRF_SetPacketType(PACKET_TYPE_GFSK);
+    SUBGRF_SetRfFrequency(SatelliteProfile.txFrequency);
+    SUBGRF_SetPaConfig(0x04, 0x07, 0x00, 0x01);
+    uint8_t pa_sw = SUBGRF_SetRfTxPower(RADIO_TX_POWER_DBM);
+    SUBGRF_WriteRegister(REG_DRV_CTRL, 0x7 << 1);
+    (void)pa_sw;
+}
+
+static void CW_Tone_On(void) {
+    SUBGRF_SetPaConfig(0x04, 0x07, 0x00, 0x01);
+    SUBGRF_SetTxParams(RFO_HP, RADIO_TX_POWER_DBM, RADIO_RAMP_40_US);
+    SUBGRF_WriteRegister(REG_DRV_CTRL, 0x7 << 1);
+    SUBGRF_SetSwitch(RFO_HP, RFSWITCH_TX);
+    SUBGRF_SetTxContinuousWave();
+}
+
+static void CW_Tone_Off(void) {
+    SUBGRF_SetStandby(STDBY_XOSC);
+}
+
+/* Morse representations: '.' = dot, '-' = dash */
+static const char* Get_Morse_Pattern(char c) {
+    switch (c) {
+        case '9':           return "----.";
+        case 'N': case 'n': return "-.";
+        case 'S': case 's': return "...";
+        case '2':           return "..---";
+        case 'P': case 'p': return ".--.";
+        case 'E': case 'e': return ".";
+        case 'A': case 'a': return ".-";
+        case 'L': case 'l': return ".-..";
+        case 'B': case 'b': return "-...";
+        default:            return "";
+    }
+}
+
+static void Transmit_Morse_String(const char *str) {
+    uart2_printf("CW TX (Morse): \"%s\"\r\n", str);
+
+    CW_Tone_Init();
+
+    for (size_t i = 0; i < strlen(str); i++) {
+        const char *pattern = Get_Morse_Pattern(str[i]);
+        for (size_t j = 0; j < strlen(pattern); j++) {
+            CW_Tone_On();
+            if (pattern[j] == '.') {
+                CPU2_Delay_Ms(MORSE_DOT_MS);
+            } else if (pattern[j] == '-') {
+                CPU2_Delay_Ms(MORSE_DASH_MS);
+            }
+            CW_Tone_Off();
+            CPU2_Delay_Ms(MORSE_DOT_MS); /* Space between dots/dashes */
+        }
+        CPU2_Delay_Ms(MORSE_DOT_MS * 2); /* Space between letters */
+    }
+    CW_Tone_Off();
+    Radio.Standby();
+}
+
 /* Asynchronous Housekeeping Beacon Timer Loop */
 static void Send_Beacon_If_Due(void) {
-    uint32_t now = HAL_GetTick();
+    if (app_state != STATE_IDLE_RX) {
+        return;
+    }
+    uint32_t now = Get_Time_Ms();
     if ((now - last_beacon_tick_ms) < BEACON_INTERVAL_MS) {
         return;
     }
     last_beacon_tick_ms = now;
-    if (app_state == STATE_TRANSMIT_BURST) {
-        return;
-    }
 
     uint8_t beacon_text[32] = "NEPSAT BEACON";
     uint8_t frame_buffer[AX25_MAX_FRAME_SIZE];
@@ -221,24 +289,31 @@ static void Send_Beacon_If_Due(void) {
     memcpy(last_tx_scrambled, frame_buffer, frame_size);
     last_tx_len = frame_size;
 
-    uart2_puts("BEACON TX (5s tick)\r\n");
+    uart2_puts("\r\nBEACON TX (5s tick)\r\n");
     uart2_puts(" TX plaintext payload : \"");
     uart2_puts((const char *)beacon_text);
     uart2_puts("\"\r\n");
     Print_AX25_Fields("TX (on-air / scrambled)", frame_buffer, frame_size);
 
-    Radio_Send_And_Wait(frame_buffer, frame_size, TX_TIMEOUT_MS);
+    Radio_Send_And_Wait(frame_buffer, frame_size, 3000);
 
-    /* Back to listening - shared arm sequence, no direct Radio.* calls */
+    /* Back to continuous RX listening on 437.375 MHz */
+    rx_done_flag = 0;
+    rx_timeout_flag = 0;
+    rx_error_flag = 0;
     RadioApp_StartRx();
 }
+
+static uint8_t s_prev_rx_buf[AX25_MAX_FRAME_SIZE];
+static uint16_t s_prev_rx_len = 0;
 
 int main(void) {
     SystemInit();
     HAL_Init();
+    SysTick_Init_CPU2(HAL_RCC_GetHCLK2Freq());
     uart2_puts("HAL_Init done\r\n");
     uart2_init();
-    uart2_puts("\r\n=== STM32WL55 AX.25 + G3RUH COMMAND->BURST START [rev8: RadioApp-only TX/RX] ===\r\n");
+    uart2_puts("\r\n=== STM32WL55 AX.25 + G3RUH COMMAND->BURST START [rev9: 100-packet burst + CW beacon] ===\r\n");
 
     RBI_Init();
     uart2_puts("RF FRONT END OK\r\n");
@@ -256,21 +331,45 @@ int main(void) {
     RadioApp_Init(&SatelliteProfile, &events);
     RadioApp_StartRx();
 
-    uart2_puts("LISTENING FOR COMMAND (and beaconing every 5s)...\r\n");
+    uart2_puts("STARTING IN CONTINUOUS CW MORSE BEACON MODE (\"9NS2S2NEPAL\")...\r\n");
 
     char tick_msg[40];
-    snprintf(tick_msg, sizeof(tick_msg), "TICK CHECK: %lu\r\n", (unsigned long)HAL_GetTick());
+    snprintf(tick_msg, sizeof(tick_msg), "TICK CHECK: %lu\r\n", (unsigned long)Get_Time_Ms());
     uart2_puts(tick_msg);
 
+    bool s_cw_mode_active = true;
     app_state = STATE_IDLE_RX;
-    last_beacon_tick_ms = HAL_GetTick();
+    last_beacon_tick_ms = Get_Time_Ms();
+    s_prev_rx_len = 0;
 
     while (1) {
+        /* If in initial CW mode, transmit Morse beacon then open RX window to check for command */
+        if (s_cw_mode_active && app_state == STATE_IDLE_RX) {
+            Transmit_Morse_String("9NS2S2NEPAL");
+
+            uart2_puts(">> SAT LISTENING 437.375 MHz FOR GROUND COMMAND (3.5s window)...\r\n");
+            rx_done_flag = 0;
+            rx_timeout_flag = 0;
+            rx_error_flag = 0;
+            RadioApp_StartRx();
+
+            /* Listen for 3500 ms for any ground station command */
+            uint32_t rx_listen_start = Get_Time_Ms();
+            while ((Get_Time_Ms() - rx_listen_start) < 3500) {
+                if (rx_done_flag) {
+                    rx_done_flag = 0;
+                    app_state = STATE_PROCESS_COMMAND;
+                    break;
+                }
+                CPU2_Delay_Ms(5);
+            }
+        }
+
         switch (app_state) {
             case STATE_IDLE_RX: {
                 if (rx_timeout_flag || rx_error_flag) {
-                    rx_timeout_flag = 0; rx_error_flag = 0;
-                    RadioApp_StartRx();
+                    rx_timeout_flag = 0;
+                    rx_error_flag = 0;
                 }
                 if (rx_done_flag) {
                     rx_done_flag = 0;
@@ -280,29 +379,39 @@ int main(void) {
             }
 
             case STATE_PROCESS_COMMAND: {
-                uart2_puts("\r\n-----------------------------------\r\n");
-                uart2_puts("FRAME RECEIVED - DESCRAMBLING & VALIDATING...\r\n");
-
                 uint16_t raw_len = (rx_frame_size > AX25_MAX_FRAME_SIZE) ? AX25_MAX_FRAME_SIZE : rx_frame_size;
                 uint8_t raw_copy[AX25_MAX_FRAME_SIZE];
                 memcpy(raw_copy, (const void *)rx_frame_buffer, raw_len);
 
-                Print_Hex_Bytes(raw_copy, raw_len);
+                /* Combine with previous buffer to form a 400-byte sliding window across chunk boundaries */
+                uint8_t stream_buffer[AX25_MAX_FRAME_SIZE * 2];
+                uint16_t stream_len = 0;
 
-                if (Looks_Like_Stale_TX_Buffer(raw_copy, raw_len)) {
-                    uart2_puts(" *** WARNING: raw bytes match our own last TX buffer ***\r\n");
+                if (s_prev_rx_len > 0) {
+                    memcpy(&stream_buffer[0], s_prev_rx_buf, s_prev_rx_len);
+                    stream_len += s_prev_rx_len;
                 }
+                memcpy(&stream_buffer[stream_len], raw_copy, raw_len);
+                stream_len += raw_len;
+
+                /* Save current buffer for the next sliding window */
+                memcpy(s_prev_rx_buf, raw_copy, raw_len);
+                s_prev_rx_len = raw_len;
 
                 uint8_t decoded_frame[AX25_MAX_FRAME_SIZE];
                 uint16_t decoded_len = 0;
 
-                if (!Protocol_ExtractFrame(raw_copy, raw_len, decoded_frame, sizeof(decoded_frame), &decoded_len)) {
-                    uart2_puts(" *** COMMAND RECEIVED: NO (no valid 0x7E...0x7E frame found) ***\r\n");
-                    RadioApp_StartRx();
+                if (!Protocol_ExtractFrame(stream_buffer, stream_len, decoded_frame, sizeof(decoded_frame), &decoded_len)) {
+                    /* Noise buffer - no frame found; smoothly continue listening */
                     app_state = STATE_IDLE_RX;
                     break;
                 }
 
+                /* Clear previous buffer history since frame was consumed */
+                s_prev_rx_len = 0;
+
+                uart2_puts("\r\n-----------------------------------\r\n");
+                uart2_puts("VALID AX.25 FRAME RECEIVED - PROCESSING COMMAND...\r\n");
                 Print_AX25_Fields("DESCRAMBLED", decoded_frame, decoded_len);
 
                 bool crc1_ok = AX25_VerifyCRC_Method1(decoded_frame, decoded_len);
@@ -317,13 +426,11 @@ int main(void) {
 
                 if (!(crc1_ok || crc2_ok)) {
                     uart2_puts(" *** COMMAND RECEIVED: NO (CRC failed both methods) ***\r\n");
-                    RadioApp_StartRx();
                     app_state = STATE_IDLE_RX;
                     break;
                 }
                 if (decoded_len < 17) {
                     uart2_puts(" *** COMMAND RECEIVED: NO (frame too short) ***\r\n");
-                    RadioApp_StartRx();
                     app_state = STATE_IDLE_RX;
                     break;
                 }
@@ -337,7 +444,6 @@ int main(void) {
 
                 if (strcmp(dest_cs, SatelliteProfile.sourceCallsign) != 0) {
                     uart2_printf(" *** COMMAND RECEIVED: NO (addressed to \"%s\", not us) ***\r\n", dest_cs);
-                    RadioApp_StartRx();
                     app_state = STATE_IDLE_RX;
                     break;
                 }
@@ -346,7 +452,6 @@ int main(void) {
                 uint16_t payload_end = decoded_len - 3;
                 if (payload_end <= payload_start) {
                     uart2_puts(" *** COMMAND RECEIVED: NO (empty payload, no opcode) ***\r\n");
-                    RadioApp_StartRx();
                     app_state = STATE_IDLE_RX;
                     break;
                 }
@@ -355,24 +460,41 @@ int main(void) {
                 uart2_printf(" *** COMMAND RECEIVED: YES (from %s, opcode 0x%02X) ***\r\n", src_cs, opcode);
 
                 if (opcode == CMD_REQUEST_BURST) {
-                    uart2_puts("CMD_REQUEST_BURST ACCEPTED - STARTING 50-PACKET BURST\r\n");
-                    app_state = STATE_TRANSMIT_BURST;
+                    if ((Get_Time_Ms() - last_burst_finish_time) < 4000) {
+                        uart2_puts("CMD_REQUEST_BURST duplicate packet - ignoring\r\n");
+                        app_state = STATE_IDLE_RX;
+                    } else {
+                        if (s_cw_mode_active) {
+                            s_cw_mode_active = false;
+                            uart2_puts("\r\n>>> GROUND COMMAND DETECTED: CW MODE STOPPED PERMANENTLY <<<\r\n");
+                        }
+                        uart2_puts("CMD_REQUEST_BURST ACCEPTED - STARTING 100-PACKET BURST\r\n");
+                        app_state = STATE_TRANSMIT_BURST;
+                    }
                 } else {
                     uart2_puts("UNKNOWN OPCODE - IGNORING\r\n");
-                    RadioApp_StartRx();
                     app_state = STATE_IDLE_RX;
                 }
                 break;
             }
 
             case STATE_TRANSMIT_BURST:
-                Transmit_Burst_50();
+                Transmit_Burst_100();
+                last_burst_finish_time = Get_Time_Ms();
+                s_prev_rx_len = 0;
+                rx_done_flag = 0;
+                rx_timeout_flag = 0;
+                rx_error_flag = 0;
+                memset((void *)rx_frame_buffer, 0, sizeof(rx_frame_buffer));
+                last_beacon_tick_ms = Get_Time_Ms();
                 RadioApp_StartRx();
-                uart2_puts("LISTENING FOR NEXT COMMAND...\r\n");
+                uart2_puts("LISTENING FOR NEXT COMMAND (and beaconing every 5s)...\r\n");
                 app_state = STATE_IDLE_RX;
                 break;
         }
-        Send_Beacon_If_Due();
+        if (!s_cw_mode_active) {
+            Send_Beacon_If_Due();
+        }
     }
     return 0;
 }

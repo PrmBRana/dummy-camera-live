@@ -62,10 +62,12 @@
 
 static void led_state(int state, unsigned int leds)
 {
+#ifndef CONFIG_STM32WL5_SPI2S2
   if (leds & BOARD_LED_BLUE_BIT)
     {
       stm32wl5_gpiowrite(GPIO_LED_BLUE, state);
     }
+#endif
 
   if (leds & BOARD_LED_RED_BIT)
     {
@@ -113,7 +115,9 @@ static int button3_led(int irq, void *context, void *arg)
 
 void board_leds_initialize(void)
 {
+#ifndef CONFIG_STM32WL5_SPI2S2
   stm32wl5_configgpio(GPIO_LED_BLUE);
+#endif
   stm32wl5_configgpio(GPIO_LED_RED);
   stm32wl5_configgpio(GPIO_LED_GREEN);
 }

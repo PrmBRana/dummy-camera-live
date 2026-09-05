@@ -23,17 +23,17 @@
  * ==========================================================================
  */
 
-/* AHB2 peripheral clock enable */
+/* CPU1 AHB2 / APB1 peripheral clock enable */
 #define RCC_AHB2ENR \
   (*(volatile uint32_t *)0x5800004CUL)
-
-/* APB1 peripheral clock enable 2 */
 #define RCC_APB1ENR2 \
   (*(volatile uint32_t *)0x5800005CUL)
 
-/* APB1 peripheral reset 2 */
-#define RCC_APB1RSTR2 \
-  (*(volatile uint32_t *)0x5800003CUL)
+/* CPU2 AHB2 / APB1 peripheral clock enable */
+#define RCC_C2AHB2ENR \
+  (*(volatile uint32_t *)0x5800014CUL)
+#define RCC_C2APB1ENR2 \
+  (*(volatile uint32_t *)0x5800015CUL)
 
 
 /*
@@ -126,116 +126,38 @@
  * ==========================================================================
  */
 
+#define RCC_CCIPR \
+  (*(volatile uint32_t *)0x58000088UL)
+
 void uart2_init(void)
 {
-  /*
-   * ----------------------------------------------------------
-   * 1. Enable GPIOA clock
-   * ----------------------------------------------------------
-   */
-
+  /* 1. Enable peripheral bus clocks for GPIOA and LPUART1 in both CPU1 and CPU2 */
   RCC_AHB2ENR |= (1UL << 0);
-
-
-  /*
-   * ----------------------------------------------------------
-   * 2. Enable LPUART1 clock
-   * ----------------------------------------------------------
-   */
-
+  RCC_C2AHB2ENR |= (1UL << 0);
   RCC_APB1ENR2 |= (1UL << 0);
+  RCC_C2APB1ENR2 |= (1UL << 0);
 
-
-  /*
-   * ----------------------------------------------------------
-   * 3. Reset LPUART1
-   * ----------------------------------------------------------
-   */
-
-  RCC_APB1RSTR2 |= (1UL << 0);
-
-  RCC_APB1RSTR2 &= ~(1UL << 0);
-
-
-  /*
-   * ----------------------------------------------------------
-   * 4. Configure PA2 and PA3 as alternate function
-   * ----------------------------------------------------------
-   *
-   * PA2 = LPUART1_TX
-   * PA3 = LPUART1_RX
-   *
-   * MODER:
-   *
-   *   10 = Alternate Function
-   */
-
+  /* 2. Configure PA2 (LPUART1_TX) and PA3 (LPUART1_RX) as Alternate Function AF8 */
   GPIOA_MODER &= ~((3UL << 4) | (3UL << 6));
-
-  GPIOA_MODER |= ((2UL << 4) | (2UL << 6));
-
-
-  /*
-   * ----------------------------------------------------------
-   * 5. Select Alternate Function 8
-   * ----------------------------------------------------------
-   *
-   * PA2 AF8 = LPUART1_TX
-   * PA3 AF8 = LPUART1_RX
-   */
+  GPIOA_MODER |= ((2UL << 4) | (2UL << 6)); /* AF mode */
 
   GPIOA_AFRL &= ~((0xFUL << 8) | (0xFUL << 12));
+  GPIOA_AFRL |= ((8UL << 8) | (8UL << 12)); /* AF8 */
 
-  GPIOA_AFRL |= ((8UL << 8) | (8UL << 12));
-
-
-  /*
-   * ----------------------------------------------------------
-   * 6. GPIO speed
-   * ----------------------------------------------------------
-   */
-
-  GPIOA_OSPEEDR |= ((3UL << 4) | (3UL << 6));
-
-
-  /*
-   * ----------------------------------------------------------
-   * 7. GPIO pull configuration
-   * ----------------------------------------------------------
-   *
-   * RX should be pulled high when idle.
-   */
+  GPIOA_OSPEEDR |= ((3UL << 4) | (3UL << 6)); /* High speed */
 
   GPIOA_PUPDR &= ~((3UL << 4) | (3UL << 6));
+  GPIOA_PUPDR |= (1UL << 6); /* Pull-up on RX (PA3) */
 
-  GPIOA_PUPDR |= (1UL << 6);
+  /* 3. Configure LPUART1 clock source to SYSCLK (48 MHz) */
+  RCC_CCIPR = (RCC_CCIPR & ~(3UL << 10)) | (1UL << 10);
 
-
-  /*
-   * ----------------------------------------------------------
-   * 8. Configure LPUART baud rate
-   * ----------------------------------------------------------
-   */
-
+  /* 4. Configure baud rate: 115200 baud @ 48 MHz */
+  LPUART1_CR1 &= ~USART_CR1_UE;
   LPUART1_BRR = LPUART1_BRR_48MHZ_115200;
 
-
-  /*
-   * ----------------------------------------------------------
-   * 9. Enable transmitter and receiver
-   * ----------------------------------------------------------
-   */
-
-  LPUART1_CR1 = USART_CR1_TE | USART_CR1_RE;
-
-
-  /*
-   * ----------------------------------------------------------
-   * 10. Enable LPUART1
-   * ----------------------------------------------------------
-   */
-
-  LPUART1_CR1 |= USART_CR1_UE;
+  /* 5. Enable transmitter, receiver, and peripheral */
+  LPUART1_CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
 }
 
 
@@ -247,15 +169,16 @@ void uart2_init(void)
 
 void uart2_putc(char c)
 {
-  /*
-   * Wait until transmit data register is empty.
-   */
-
-  while ((LPUART1_ISR & USART_ISR_TXE) == 0)
+  /* Wait until transmit data register is empty, with timeout so we never hang */
+  uint32_t timeout = 100000;
+  while ((LPUART1_ISR & USART_ISR_TXE) == 0 && --timeout)
     {
     }
 
-  LPUART1_TDR = (uint32_t)c;
+  if (timeout > 0)
+    {
+      LPUART1_TDR = (uint32_t)c;
+    }
 }
 
 

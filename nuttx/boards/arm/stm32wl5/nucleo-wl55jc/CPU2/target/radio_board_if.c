@@ -59,178 +59,91 @@
 /* Exported functions --------------------------------------------------------*/
 int32_t RBI_Init(void)
 {
-
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-
     __HAL_RCC_GPIOA_CLK_ENABLE();
-
-
-    /*
-       PA8  = PA Enable
-       PA1  = LNA Enable
-    */
-
-
-    GPIO_InitStruct.Pin =
-            GPIO_PIN_8 | GPIO_PIN_1;
-
-    GPIO_InitStruct.Mode =
-            GPIO_MODE_OUTPUT_PP;
-
-    GPIO_InitStruct.Pull =
-            GPIO_NOPULL;
-
-    GPIO_InitStruct.Speed =
-            GPIO_SPEED_FREQ_LOW;
-
-
-    HAL_GPIO_Init(GPIOA,&GPIO_InitStruct);
-
-
+    __HAL_RCC_GPIOC_CLK_ENABLE();
 
     /*
-       Default:
-       PA OFF
-       LNA OFF
-    */
+     * Custom Satellite Front-End:
+     *   PA8 = External PA Enable
+     */
+    GPIO_InitStruct.Pin = GPIO_PIN_8;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+    /*
+     * STM32WL55 Nucleo Board RF Switch:
+     *   PC4 = FE_CTRL1
+     *   PC5 = FE_CTRL2
+     *   PC3 = FE_CTRL3
+     */
+    GPIO_InitStruct.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    HAL_GPIO_WritePin(GPIOA,
-                      GPIO_PIN_8,
-                      GPIO_PIN_RESET);
-
-
-    HAL_GPIO_WritePin(GPIOA,
-                      GPIO_PIN_1,
-                      GPIO_PIN_RESET);
-
+    /* Default: All OFF */
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5, GPIO_PIN_RESET);
 
     return 0;
 }
 
 int32_t RBI_DeInit(void)
 {
-  /* USER CODE BEGIN RBI_DeInit_1 */
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5, GPIO_PIN_RESET);
 
-  /* USER CODE END RBI_DeInit_1 */
-#if defined(USE_BSP_DRIVER)
-  /* Important note: BSP code is board dependent
-   * STM32WL_Nucleo code can be found
-   *       either in STM32CubeWL package under Drivers/BSP/STM32WLxx_Nucleo/
-   *       or at https://github.com/STMicroelectronics/STM32CubeWL/tree/main/Drivers/BSP/STM32WLxx_Nucleo/
-   * 1/ For User boards, the BSP/STM32WLxx_Nucleo/ directory can be copied and replaced in the project. The copy must then be updated depending:
-   *       on board RF switch configuration (pin control, number of port etc)
-   *       on TCXO configuration
-   *       on DC/DC configuration
-   *       on maximum output power that the board can deliver*/
-  return BSP_RADIO_DeInit();
-#else
-  /* 2/ Or implement RBI_DeInit here */
-  int32_t retcode = 0;
-  /* USER CODE BEGIN RBI_DeInit_2 */
-#warning user to provide its board code or to call his board driver functions
-  /* USER CODE END RBI_DeInit_2 */
-  return retcode;
-#endif  /* USE_BSP_DRIVER */
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_8);
+    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5);
+
+    return 0;
 }
 
 int32_t RBI_ConfigRFSwitch(RBI_Switch_TypeDef Config)
 {
-
-    switch(Config)
+    switch (Config)
     {
-
-
     case RBI_SWITCH_RFO_HP:
+        /* Custom PA ON */
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
 
-        uart2_puts("RFSWITCH TX HP\r\n");
-
-
-        // PA ON
-        HAL_GPIO_WritePin(GPIOA,
-                          GPIO_PIN_8,
-                          GPIO_PIN_SET);
-
-
-        // LNA OFF
-        HAL_GPIO_WritePin(GPIOA,
-                          GPIO_PIN_1,
-                          GPIO_PIN_RESET);
-
-
+        /* Nucleo RF Switch -> TX HP to SMA: CTRL3=1, CTRL1=0, CTRL2=1 */
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_SET);
         break;
-
 
     case RBI_SWITCH_RFO_LP:
+        /* Custom PA ON */
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
 
-        uart2_puts("RFSWITCH TX LP (unexpected on this board)\r\n");
-
-
-        // Treat same as HP path since board only has one external PA
-        HAL_GPIO_WritePin(GPIOA,
-                          GPIO_PIN_8,
-                          GPIO_PIN_SET);
-
-
-        // LNA OFF
-        HAL_GPIO_WritePin(GPIOA,
-                          GPIO_PIN_1,
-                          GPIO_PIN_RESET);
-
-
+        /* Nucleo RF Switch -> TX LP to SMA: CTRL3=1, CTRL1=1, CTRL2=1 */
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_SET);
         break;
-
-
 
     case RBI_SWITCH_RX:
+        /* Custom PA OFF */
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
 
-
-        uart2_puts("RFSWITCH RX\r\n");
-
-
-        // PA OFF
-        HAL_GPIO_WritePin(GPIOA,
-                          GPIO_PIN_8,
-                          GPIO_PIN_RESET);
-
-
-        // LNA ON
-        HAL_GPIO_WritePin(GPIOA,
-                          GPIO_PIN_1,
-                          GPIO_PIN_SET);
-
-
+        /* Nucleo RF Switch -> RX from SMA: CTRL3=1, CTRL1=1, CTRL2=0 */
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET);
         break;
-
-
 
     case RBI_SWITCH_OFF:
-
-
-        uart2_puts("RFSWITCH OFF\r\n");
-
-
-        HAL_GPIO_WritePin(GPIOA,
-                          GPIO_PIN_8,
-                          GPIO_PIN_RESET);
-
-
-        HAL_GPIO_WritePin(GPIOA,
-                          GPIO_PIN_1,
-                          GPIO_PIN_RESET);
-
-
-        break;
-
-
-
     default:
-
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5, GPIO_PIN_RESET);
         break;
-
     }
-
 
     return 0;
 }

@@ -492,6 +492,18 @@ ifeq ($(CONFIG_SENSORS_CXD5602PWBIMU),y)
   CSRCS += cxd5602pwbimu.c
 endif
 
+# InvenSense IAM-20380 Gyroscope
+
+ifeq ($(CONFIG_SENSORS_IAM20380),y)
+  CSRCS += iam20380.c
+endif
+
+# MEMSIC MMC5983MA Magnetometer
+
+ifeq ($(CONFIG_SENSORS_MMC5983MA),y)
+  CSRCS += mmc5983ma.c
+endif
+
 # Include sensor driver build support
 
 DEPPATH += --dep-path sensors

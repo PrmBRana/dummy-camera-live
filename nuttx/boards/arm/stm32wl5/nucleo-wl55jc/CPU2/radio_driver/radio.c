@@ -704,48 +704,30 @@ TimerEvent_t RxTimeoutTimer;
 
 static void RadioInit( RadioEvents_t *events )
 {
-    uart2_puts("R1\r\n");
-
     RadioEvents = events;
-
-    uart2_puts("R2\r\n");
 
     SubgRf.RxContinuous = false;
     SubgRf.TxTimeout = 0;
     SubgRf.RxTimeout = 0;
     SubgRf.RxDcPreambleDetectTimeout = 0;
 
-    uart2_puts("R3\r\n");
-
     SUBGRF_Init(RadioOnDioIrq);
-
-    uart2_puts("R4\r\n");
 
     SubgRf.PublicNetwork.Current = false;
     SubgRf.PublicNetwork.Previous = false;
 
-    uart2_puts("R5\r\n");
-
     RADIO_IRQ_PROCESS_INIT();
-
-    uart2_puts("R6\r\n");
 
     SUBGRF_SetRegulatorMode();
 
-    uart2_puts("R7\r\n");
-
-        /* FIX: TX and RX must NOT share the same SX126x internal SRAM
+    /* FIX: TX and RX must NOT share the same SX126x internal SRAM
        offset, or a stale TX buffer gets read back as if it were a
        fresh reception. Give them non-overlapping 128-byte regions
        (matches AX25_MAX_FRAME_LEN in both main.c files). */
 
     SUBGRF_SetBufferBaseAddress(0x00, 0x80);
 
-    uart2_puts("R8\r\n");
-
     SUBGRF_SetTxParams(RFO_LP, 0, RADIO_RAMP_200_US);
-
-    uart2_puts("R9\r\n");
 
     SUBGRF_SetDioIrqParams(
         IRQ_RADIO_ALL,
@@ -753,19 +735,13 @@ static void RadioInit( RadioEvents_t *events )
         IRQ_RADIO_NONE,
         IRQ_RADIO_NONE);
 
-    uart2_puts("R10\r\n");
-
     RadioSleep();
-
-    uart2_puts("R11\r\n");
 
     TimerInit(&TxTimeoutTimer, RadioOnTxTimeoutIrq);
     TimerInit(&RxTimeoutTimer, RadioOnRxTimeoutIrq);
 
     TimerStop(&TxTimeoutTimer);
     TimerStop(&RxTimeoutTimer);
-
-    uart2_puts("R12\r\n");
 }
 
 static RadioState_t RadioGetStatus( void )
@@ -1100,7 +1076,7 @@ static void RadioSetTxConfig( RadioModems_t modem, int8_t power, uint32_t fdev,
             SubgRf.ModulationParams.PacketType = PACKET_TYPE_GFSK;
             SubgRf.ModulationParams.Params.Gfsk.BitRate = datarate;
 
-            SubgRf.ModulationParams.Params.Gfsk.ModulationShaping = MOD_SHAPING_G_BT_1;
+            SubgRf.ModulationParams.Params.Gfsk.ModulationShaping = MOD_SHAPING_G_BT_05;
             SubgRf.ModulationParams.Params.Gfsk.Bandwidth = SUBGRF_GetFskBandwidthRegValue( bandwidth );
             SubgRf.ModulationParams.Params.Gfsk.Fdev = fdev;
 
@@ -1421,8 +1397,6 @@ static radio_status_t RadioSend( uint8_t *buffer, uint8_t size )
             }
             else
             {
-                SubgRf.PacketParams.Params.Gfsk.SyncWordLength = 32;
-                SubgRf.PacketParams.Params.Gfsk.PreambleMinDetect = RADIO_PREAMBLE_DETECTOR_16_BITS;
                 SubgRf.PacketParams.Params.Gfsk.PayloadLength = size;
                 SUBGRF_SetPacketParams( &SubgRf.PacketParams );
                 SUBGRF_SendPayload( buffer, size, 0 );
@@ -1665,6 +1639,13 @@ static void RadioReadRegisters( uint16_t addr, uint8_t *buffer, uint8_t size )
     SUBGRF_ReadRegisters( addr, buffer, size );
 }
 
+static void RadioSetTxInfinitePreamble( RadioModems_t modem, uint32_t freq, int8_t power, uint32_t time )
+{
+    RadioSetChannel( freq );
+    RadioSetTxConfig( modem, power, 0, 0, 0, 0, 0, false, false, 0, 0, 0, 0 );
+    RadioTxPrbs( );
+}
+
 static void RadioSetMaxPayloadLength( RadioModems_t modem, uint8_t max )
 {
     if( modem == MODEM_LORA )
@@ -1703,7 +1684,7 @@ static void RadioSetPublicNetwork( bool enable )
 
 static uint32_t RadioGetWakeupTime( void )
 {
-    return SUBGRF_GetRadioWakeUpTime() + RADIO_WAKEUP_TIME;
+    return SUBGRF_GetRadioWakeUpTime( ) + RADIO_WAKEUP_TIME;
 }
 
 static void RadioOnTxTimeoutIrq( void *context )
@@ -1748,20 +1729,7 @@ static void RadioIrqProcess( void )
     uint8_t size = 0;
     int32_t cfo = 0;
 
-        /* FIX: explicitly clear the IRQ flag(s) we're about to service.
-       Without this, a latched flag on the SX126x can cause the same
-       event to re-fire on unchanged internal state instead of
-       waiting for a genuinely new TX/RX event. */
     SUBGRF_ClearIrqStatus( SubgRf.RadioIrq );
-
-    /* DIAGNOSTIC: dump raw chip error register alongside the IRQ mask,
-       to rule out a PLL/XOSC/calibration fault masquerading as a
-       packet-level CRC error. */
-    {
-        RadioError_t derr = SUBGRF_GetDeviceErrors();
-        uart2_printf("RadioIrqProcess: raw IRQ mask=0x%04X, DeviceErrors=0x%04X\r\n",
-                     (unsigned)SubgRf.RadioIrq, (unsigned)derr.Value);
-    }
 
     switch( SubgRf.RadioIrq )
     {
@@ -1800,28 +1768,7 @@ static void RadioIrqProcess( void )
         SUBGRF_WriteRegister( SUBGHZ_EVENTMASKR, SUBGRF_ReadRegister( SUBGHZ_EVENTMASKR ) | ( 1 << 1 ) );
     }
     SUBGRF_GetPayload( RadioBuffer, &size, 255 );
-    uart2_printf("DEBUG: size = %u\r\n", size);
-    
-    for(uint16_t i = 0; i < 16 && i < size; i++)
-        uart2_printf("%02X ", RadioBuffer[i]);
-    
-    uart2_printf("\r\n");
     SUBGRF_GetPacketStatus( &( SubgRf.PacketStatus ) );
-
-    /* Reject bad packets */
-    if( SubgRf.PacketStatus.packetType != PACKET_TYPE_LORA )
-    {
-        uint8_t rxstat = SubgRf.PacketStatus.Params.Gfsk.RxStatus;
-        if( rxstat & 0x34 ) /* AddrErr | CrcErr | LengthErr | AbortErr */
-        {
-            uart2_printf("RX_DONE rejected, RxStatus=0x%02X\r\n", rxstat);
-            if( ( RadioEvents != NULL ) && ( RadioEvents->RxError != NULL ) )
-            {
-                RadioEvents->RxError();
-            }
-            break;
-        }
-    }
 
     if( ( RadioEvents != NULL ) && ( RadioEvents->RxDone != NULL ) )
     {
@@ -1833,7 +1780,6 @@ static void RadioIrqProcess( void )
             break;
         default:
             SUBGRF_GetCFO( SubgRf.ModulationParams.Params.Gfsk.BitRate, &cfo );
-            /* Changed RssiAvg → RssiSync */
             RadioEvents->RxDone( RadioBuffer, size, SubgRf.PacketStatus.Params.Gfsk.RssiSync, ( int8_t ) DIVR( cfo, 1000 ) );
             break;
         }
@@ -1841,7 +1787,6 @@ static void RadioIrqProcess( void )
     break;
 
     case IRQ_CAD_CLEAR:
-        //!< Update operating mode state to a value lower than \ref MODE_STDBY_XOSC
         SUBGRF_SetStandby( STDBY_RC );
         if( ( RadioEvents != NULL ) && ( RadioEvents->CadDone != NULL ) )
         {
@@ -1849,7 +1794,6 @@ static void RadioIrqProcess( void )
         }
         break;
     case IRQ_CAD_DETECTED:
-        //!< Update operating mode state to a value lower than \ref MODE_STDBY_XOSC
         SUBGRF_SetStandby( STDBY_RC );
         if( ( RadioEvents != NULL ) && ( RadioEvents->CadDone != NULL ) )
         {
@@ -1858,13 +1802,10 @@ static void RadioIrqProcess( void )
         break;
 
     case IRQ_RX_TX_TIMEOUT:
-        MW_LOG( TS_ON, VLEVEL_M,  "IRQ_RX_TX_TIMEOUT\r\n" );
         if( SUBGRF_GetOperatingMode( ) == MODE_TX )
         {
             DBG_GPIO_RADIO_TX( RST );
-
             TimerStop( &TxTimeoutTimer );
-            //!< Update operating mode state to a value lower than \ref MODE_STDBY_XOSC
             SUBGRF_SetStandby( STDBY_RC );
             if( ( RadioEvents != NULL ) && ( RadioEvents->TxTimeout != NULL ) )
             {
@@ -1874,9 +1815,7 @@ static void RadioIrqProcess( void )
         else if( SUBGRF_GetOperatingMode( ) == MODE_RX )
         {
             DBG_GPIO_RADIO_RX( RST );
-
             TimerStop( &RxTimeoutTimer );
-            //!< Update operating mode state to a value lower than \ref MODE_STDBY_XOSC
             SUBGRF_SetStandby( STDBY_RC );
             if( ( RadioEvents != NULL ) && ( RadioEvents->RxTimeout != NULL ) )
             {
@@ -1885,34 +1824,21 @@ static void RadioIrqProcess( void )
         }
         break;
     case IRQ_PREAMBLE_DETECTED:
-        MW_LOG( TS_ON, VLEVEL_M,  "PRE OK\r\n" );
-        uart2_puts("*** IRQ: PREAMBLE DETECTED ***\r\n");
-        {
-            int32_t cfo_hz = 0;
-            SUBGRF_GetCFO( SubgRf.ModulationParams.Params.Gfsk.BitRate, &cfo_hz );
-            uart2_printf("    CFO at preamble lock = %ld Hz\r\n", (long)cfo_hz);
-        }
-        /*See STM32WL Errata: RadioSetRxDutyCycle*/
         if( SubgRf.RxDcPreambleDetectTimeout != 0 )
         {
-            /* Update Radio RTC period */
-            Radio.Write( SUBGHZ_RTCPRDR2, ( SubgRf.RxDcPreambleDetectTimeout >> 16 ) & 0xFF ); /*Update Radio RTC Period MSB*/
-            Radio.Write( SUBGHZ_RTCPRDR1, ( SubgRf.RxDcPreambleDetectTimeout >> 8 ) & 0xFF ); /*Update Radio RTC Period MidByte*/
-            Radio.Write( SUBGHZ_RTCPRDR0, ( SubgRf.RxDcPreambleDetectTimeout ) & 0xFF ); /*Update Radio RTC Period lsb*/
-            Radio.Write( SUBGHZ_RTCCTLR, Radio.Read( SUBGHZ_RTCCTLR ) | 0x1 ); /*restart Radio RTC*/
+            Radio.Write( SUBGHZ_RTCPRDR2, ( SubgRf.RxDcPreambleDetectTimeout >> 16 ) & 0xFF );
+            Radio.Write( SUBGHZ_RTCPRDR1, ( SubgRf.RxDcPreambleDetectTimeout >> 8 ) & 0xFF );
+            Radio.Write( SUBGHZ_RTCPRDR0, ( SubgRf.RxDcPreambleDetectTimeout ) & 0xFF );
+            Radio.Write( SUBGHZ_RTCCTLR, Radio.Read( SUBGHZ_RTCCTLR ) | 0x1 );
             SubgRf.RxDcPreambleDetectTimeout = 0;
-            /*Clear IRQ_PREAMBLE_DETECTED mask*/
             SUBGRF_SetDioIrqParams( IRQ_RX_DONE | IRQ_RX_TX_TIMEOUT | IRQ_CRC_ERROR | IRQ_HEADER_ERROR | IRQ_RX_DBG,
                                     IRQ_RX_DONE | IRQ_RX_TX_TIMEOUT | IRQ_CRC_ERROR | IRQ_HEADER_ERROR | IRQ_RX_DBG,
                                     IRQ_RADIO_NONE,
                                     IRQ_RADIO_NONE );
-
         }
         break;
 
     case IRQ_SYNCWORD_VALID:
-        MW_LOG( TS_ON, VLEVEL_M,  "SYNC OK\r\n" );
-        uart2_puts("*** IRQ: SYNC WORD VALID ***\r\n");
         if( 1UL == RFW_Is_Init( ) )
         {
             RFW_ReceivePayload( );
@@ -1920,30 +1846,23 @@ static void RadioIrqProcess( void )
         break;
 
     case IRQ_HEADER_VALID:
-        MW_LOG( TS_ON, VLEVEL_M,  "HDR OK\r\n" );
         break;
 
     case IRQ_HEADER_ERROR:
         TimerStop( &RxTimeoutTimer );
         if( SubgRf.RxContinuous == false )
         {
-            //!< Update operating mode state to a value lower than \ref MODE_STDBY_XOSC
             SUBGRF_SetStandby( STDBY_RC );
         }
         if( ( RadioEvents != NULL ) && ( RadioEvents->RxTimeout != NULL ) )
         {
             RadioEvents->RxTimeout( );
-            MW_LOG( TS_ON, VLEVEL_M,  "HDR KO\r\n" );
-            uart2_puts("*** IRQ: HEADER ERROR ***\r\n");
         }
         break;
 
     case IRQ_CRC_ERROR:
-        MW_LOG( TS_ON, VLEVEL_M,  "IRQ_CRC_ERROR\r\n" );
-
         if( SubgRf.RxContinuous == false )
         {
-            //!< Update operating mode state to a value lower than \ref MODE_STDBY_XOSC
             SUBGRF_SetStandby( STDBY_RC );
         }
         if( ( RadioEvents != NULL ) && ( RadioEvents->RxError ) )

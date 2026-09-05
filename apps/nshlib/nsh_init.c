@@ -25,6 +25,7 @@
 #include <nuttx/config.h>
 
 #include <sys/boardctl.h>
+#include <sched.h>
 #include <nuttx/symtab.h>
 
 #include "system/readline.h"

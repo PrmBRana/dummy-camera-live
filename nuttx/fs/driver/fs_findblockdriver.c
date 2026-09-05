@@ -72,16 +72,17 @@ int find_blockdriver(FAR const char *pathname, int mountflags,
   int ret = 0; /* Assume success */
 
   DEBUGASSERT(pathname != NULL || ppinode != NULL);
-
+  printf("find_blockdriver: pathname=\"%s\"\n", pathname);
   finfo("pathname=\"%s\"\n", pathname);
 
   /* Find the inode registered with this pathname */
 
   SETUP_SEARCH(&desc, pathname, false);
-
+  printf("find_blockdriver: calling inode_find\n");
   ret = inode_find(&desc);
   if (ret < 0)
     {
+      printf("find_blockdriver: inode_find failed: %d\n", ret);
       ferr("ERROR: Failed to find %s\n", pathname);
       ret = -ENOENT;
       goto errout_with_search;
@@ -90,6 +91,7 @@ int find_blockdriver(FAR const char *pathname, int mountflags,
   /* Get the search results */
 
   inode = desc.node;
+  printf("find_blockdriver: found inode at %p\n", (void *)inode);
 
   /* Verify that the inode is a block driver. */
 
@@ -98,23 +100,27 @@ int find_blockdriver(FAR const char *pathname, int mountflags,
 #ifdef CONFIG_MTD
       if (INODE_IS_MTD(inode))
         {
+          printf("find_blockdriver Second: %s is a MTD\n", pathname);
           finfo("%s is a MTD\n", pathname);
         }
       else
 #endif
         {
+          printf("find_blockdriver Third: %s is not a block driver\n", pathname);
           ferr("ERROR: %s is not a block driver\n", pathname);
         }
 
       ret = -ENOTBLK;
       goto errout_with_inode;
     }
+printf("find_blockdriver last: %s is a block driver\n", pathname);
 
   /* Make sure that the inode supports the requested access */
 
   if (!inode->u.i_bops || !inode->u.i_bops->read ||
       (!inode->u.i_bops->write && (mountflags & MS_RDONLY) == 0))
     {
+      printf("find_blockdriver: %s does not support requested access\n", pathname);
       ferr("ERROR: %s does not support requested access\n", pathname);
       ret = -EACCES;
       goto errout_with_inode;

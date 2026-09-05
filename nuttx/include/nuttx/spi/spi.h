@@ -480,6 +480,8 @@
 #define SPIDEV_IMU(n)           SPIDEV_ID(SPIDEVTYPE_IMU,           (n))
 #define SPIDEV_MAG_ENCODER(n)   SPIDEV_ID(SPIDEVTYPE_MAG_ENCODER,   (n))
 #define SPIDEV_USER(n)          SPIDEV_ID(SPIDEVTYPE_USER,          (n))
+#define SPIDEV_MAIN_FLASH(n)    SPIDEV_ID(SPIDEVTYPE_MAIN_FLASH,    (n))
+
 
 /****************************************************************************
  * Public Types
@@ -521,6 +523,7 @@ enum spi_devtype_e
   SPIDEVTYPE_MOTOR,         /* Select SPI motor device */
   SPIDEVTYPE_IMU,           /* Select SPI IMU device */
   SPIDEVTYPE_MAG_ENCODER,   /* Select SPI Magnetic Encoder device */
+  SPIDEVTYPE_MAIN_FLASH,    /* Select SPI Main Flash device */
   SPIDEVTYPE_USER           /* Board-specific values start here
                              * This must always be the last definition. */
 };

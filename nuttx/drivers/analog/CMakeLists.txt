@@ -106,6 +106,10 @@ if(CONFIG_ADC)
     list(APPEND SRCS mcp3008.c)
   endif()
 
+  if(CONFIG_ADC_ADS7953)
+    list(APPEND SRCS ads7953.c)
+  endif()
+
   if(CONFIG_ADC_ADS1115)
     list(APPEND SRCS ads1115.c)
   endif()

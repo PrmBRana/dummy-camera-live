@@ -122,4 +122,5 @@ bool stm32wl5_pwr_enablebkp(bool writable)
 void stm32wl5_pwr_boot_c2(void)
 {
   modifyreg32(STM32WL5_PWR_CR4, 0, PWR_CR4_C2BOOT);
+  __asm__ volatile ("sev");
 }

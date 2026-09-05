@@ -39,4 +39,13 @@ include tools/Win.mk
 else
 include tools/Unix.mk
 endif
+
+flash_gs flash_GS:
+	$(MAKE) -C boards/arm/stm32wl5/nucleo-wl55jc/CPU2 flash_GS
+
+flash_sat flash_SAT:
+	$(MAKE) -C boards/arm/stm32wl5/nucleo-wl55jc/CPU2 flash_sat
+
+.PHONY: flash_gs flash_GS flash_sat flash_SAT
 endif
+

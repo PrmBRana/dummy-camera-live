@@ -2233,4 +2233,18 @@ config QMI8658_I2C_FREQUENCY
 
 endif # SENSORS_QMI8658
 
+config SENSORS_IAM20380
+	bool "InvenSense IAM-20380 Gyroscope"
+	default n
+	depends on SPI
+	---help---
+		Enable driver support for the InvenSense IAM-20380 3-axis gyroscope over SPI.
+
+config SENSORS_MMC5983MA
+	bool "MEMSIC MMC5983MA Magnetometer"
+	default n
+	depends on SPI
+	---help---
+		Enable driver support for the MEMSIC MMC5983MA 3-axis magnetometer over SPI.
+
 endif # SENSORS

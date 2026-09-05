@@ -18,7 +18,15 @@
 #
 ############################################################################
 
-TARGET = ipcc_m0plus
+APP ?= satellite
+
+ifeq ($(APP),gs)
+  MAIN_SRC = satellite/gs_main.c
+  TARGET   = gs_m0plus
+else
+  MAIN_SRC = ipcc_m0plus_main.c
+  TARGET   = ipcc_m0plus
+endif
 
 
 # ==========================================================================
@@ -115,7 +123,7 @@ LDFLAGS = $(CPU) \
 # ==========================================================================
 
 C_SRCS = \
-ipcc_m0plus_main.c \
+$(MAIN_SRC) \
 uart_debug.c \
 $(SHARED_IPC)/Sring_buffer.c \
 core/Src/ax25.c \
@@ -201,7 +209,7 @@ $(TARGET).bin: $(TARGET).elf
 	@echo " ELF : $(TARGET).elf"
 	@echo " BIN : $(TARGET).bin"
 	@echo " MAP : $(TARGET).map"
-	@echo " Flash address: 0x08020000"
+	@echo " Flash address: 0x08032000"
 	@echo "========================================"
 
 	@$(SIZE) $(TARGET).elf
@@ -224,22 +232,46 @@ $(TARGET).bin: $(TARGET).elf
 
 
 # ==========================================================================
+# ==========================================================================
+# PROGRAMMER
+# ==========================================================================
+
+STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || ls /home/prem/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null || echo STM32_Programmer_CLI)
+
+# ==========================================================================
 # FLASH CPU2
 # ==========================================================================
 
 flash: $(TARGET).bin
+	@if [ -x "$$(which $(STM32_PROG) 2>/dev/null)" ] || [ -x "$(STM32_PROG)" ]; then \
+	  echo "Flashing $(TARGET).bin to 0x08032000 using STM32_Programmer_CLI..."; \
+	  $(STM32_PROG) -c port=SWD -w $(TARGET).bin 0x08032000 -v -hardRst; \
+	else \
+	  echo "Flashing $(TARGET).bin to 0x08032000 using OpenOCD..."; \
+	  openocd \
+	    -f interface/stlink.cfg \
+	    -f target/stm32wlx.cfg \
+	    -c "init" \
+	    -c "targets" \
+	    -c "reset halt" \
+	    -c "halt" \
+	    -c "flash probe 0" \
+	    -c "program $(TARGET).bin 0x08032000 verify" \
+	    -c "reset run" \
+	    -c "exit"; \
+	fi
 
-	openocd \
-	  -f interface/stlink.cfg \
-	  -f target/stm32wlx.cfg \
-	  -c "init" \
-	  -c "targets" \
-	  -c "reset halt" \
-	  -c "halt" \
-	  -c "flash probe 0" \
-	  -c "program $(TARGET).bin 0x08020000 verify" \
-	  -c "reset run" \
-	  -c "exit"
+sat:
+	$(MAKE) APP=satellite
+
+flash_sat flash_SAT:
+	$(MAKE) APP=satellite flash
+
+gs:
+	$(MAKE) APP=gs
+
+flash_gs flash_GS:
+	$(MAKE) APP=gs flash
 
 
 # ==========================================================================
@@ -259,6 +291,8 @@ clean:
 	rm -f $(TARGET).elf
 	rm -f $(TARGET).bin
 	rm -f $(TARGET).map
+	rm -f ipcc_m0plus.elf ipcc_m0plus.bin ipcc_m0plus.map
+	rm -f gs_m0plus.elf gs_m0plus.bin gs_m0plus.map
 
 
-.PHONY: all flash size clean
+.PHONY: all flash sat flash_sat flash_SAT gs flash_gs flash_GS size clean

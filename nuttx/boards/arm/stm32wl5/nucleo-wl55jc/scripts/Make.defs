@@ -39,3 +39,24 @@ AFLAGS := $(CFLAGS) -D__ASSEMBLY__
 NXFLATLDFLAGS1 = -r -d -warn-common
 NXFLATLDFLAGS2 = $(NXFLATLDFLAGS1) -T$(TOPDIR)/binfmt/libnxflat/gnu-nxflat-pcrel.ld -no-check-sections
 LDNXFLATFLAGS = -e main -s 2048
+
+# POSTBUILD -- Print total Flash and RAM memory usage
+define POSTBUILD
+	$(Q) $(CROSSDEV)size $1/nuttx | awk 'NR==2 { \
+		text=$$1; data=$$2; bss=$$3; \
+		flash=text+data; ram=data+bss; \
+		c1_flash=200*1024; c2_flash=56*1024; chip_flash=256*1024; c1_ram=32*1024; \
+		f_used=flash; f_free=c1_flash-flash; f_pct=f_used*100/c1_flash; f_free_pct=100-f_pct; \
+		tot_free=chip_flash-flash; tot_pct=f_used*100/chip_flash; tot_free_pct=100-tot_pct; \
+		r_used=ram; r_free=c1_ram-ram; r_pct=r_used*100/c1_ram; r_free_pct=100-r_pct; \
+		printf "\n======================================== MEMORY USAGE SUMMARY ========================================\n"; \
+		printf "  %-18s  %-19s  %-21s  %-20s  %7s  %7s\n", "Memory Region", "Total Capacity", "Used Space", "Free / Available", "Used %", "Free %"; \
+		printf "  ------------------  -------------------  ---------------------  --------------------  -------  -------\n"; \
+		printf "  %-18s  %5.1f KB (%6d B)  %5.1f KB (%6d B)  %5.1f KB (%6d B)   %5.1f%%   %5.1f%%\n", "CPU1 Flash (App)", c1_flash/1024, c1_flash, f_used/1024, f_used, f_free/1024, f_free, f_pct, f_free_pct; \
+		printf "  %-18s  %5.1f KB (%6d B)  [  Reserved for CPU2 Radio Firmware at 0x08032000  ]       --       --\n", "CPU2 Flash (M0+)", c2_flash/1024, c2_flash; \
+		printf "  %-18s  %5.1f KB (%6d B)  %5.1f KB (%6d B)  %5.1f KB (%6d B)   %5.1f%%   %5.1f%%\n", "Chip Total Flash", chip_flash/1024, chip_flash, f_used/1024, f_used, tot_free/1024, tot_free, tot_pct, tot_free_pct; \
+		printf "  ------------------  -------------------  ---------------------  --------------------  -------  -------\n"; \
+		printf "  %-18s  %5.1f KB (%6d B)  %5.1f KB (%6d B)  %5.1f KB (%6d B)   %5.1f%%   %5.1f%%\n", "CPU1 SRAM1 (RAM)", c1_ram/1024, c1_ram, r_used/1024, r_used, r_free/1024, r_free, r_pct, r_free_pct; \
+		printf "======================================================================================================\n\n"; \
+	}'
+endef

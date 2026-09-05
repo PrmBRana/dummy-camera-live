@@ -80,6 +80,14 @@ void weak_function stm32wl5_spidev_initialize(void)
       return;
     }
 
+#if defined(CONFIG_MTD_M25P)
+  /* SPI1 Flash chip select */
+  stm32wl5_configgpio(GPIO_SPI1_NSS);
+
+  /* Flash deselected */
+  stm32wl5_gpiowrite(GPIO_SPI1_NSS, true);
+#endif
+
 #ifdef CONFIG_LCD_SSD1680
   spiinfo("Preparing additional lines for SSD1680 device\n");
   stm32wl5_configgpio(GPIO_SSD1680_CS);    /* SSD1680 chip select */
@@ -90,10 +98,33 @@ void weak_function stm32wl5_spidev_initialize(void)
 
 #endif
 
-#ifdef CONFIG_STM32_SPI2S2
+#ifdef CONFIG_STM32WL5_SPI2S2
   /* Configure SPI-based devices */
 
-  g_spi2 = stm32_spibus_initialize(2);
+  g_spi2 = stm32wl5_spibus_initialize(2);
+  if (!g_spi2)
+    {
+      spierr("ERROR: FAILED to initialize SPI port 2\n");
+      return;
+    }
+
+#if defined(CONFIG_ADC_ADS7953)
+  /* SPI2S2 chip select for ADC1 */
+  stm32wl5_configgpio(GPIO_SPI2S2_NSS1);
+  stm32wl5_gpiowrite(GPIO_SPI2S2_NSS1, true);
+
+  /* SPI2S2 chip select for ADC2 */
+  stm32wl5_configgpio(GPIO_SPI2S2_NSS2);
+  stm32wl5_gpiowrite(GPIO_SPI2S2_NSS2, true);
+
+    /* SPI2S2 chip select for MAG */
+  stm32wl5_configgpio(GPIO_SPI2S2_NSS3);
+  stm32wl5_gpiowrite(GPIO_SPI2S2_NSS3, true);
+
+    /* SPI2S2 chip select for MPU */
+  stm32wl5_configgpio(GPIO_SPI2S2_NSS4);
+  stm32wl5_gpiowrite(GPIO_SPI2S2_NSS4, true);
+#endif
 #endif
 }
 
@@ -130,6 +161,13 @@ void stm32wl5_spi1select(struct spi_dev_s *dev, uint32_t devid,
   spiinfo("devid: %d CS: %s\n", (int)devid, selected ? "assert" :
           "de-assert");
 
+#if defined(CONFIG_MTD_M25P)
+  if (devid == SPIDEV_FLASH(0) || devid == SPIDEV_MAIN_FLASH(0))
+    {
+      stm32wl5_gpiowrite(GPIO_SPI1_NSS, !selected);
+    }
+#endif
+
 #if defined(CONFIG_LCD_SSD1680)
   if (devid == SPIDEV_DISPLAY(0))
     {
@@ -160,7 +198,12 @@ uint8_t stm32wl5_spi1status(struct spi_dev_s *dev, uint32_t devid)
       return SPI_STATUS_PRESENT;
     }
 #endif
-
+#if defined(CONFIG_MTD_M25P)
+  if (devid == SPIDEV_FLASH(0) || devid == SPIDEV_MAIN_FLASH(0))
+    {
+      return SPI_STATUS_PRESENT;
+    }
+#endif
   return 0;
 }
 
@@ -184,10 +227,39 @@ void stm32wl5_spi2s2select(struct spi_dev_s *dev, uint32_t devid,
 {
   spiinfo("devid: %d CS: %s\n", (int)devid, selected ? "assert" :
           "de-assert");
+
+#if defined(CONFIG_ADC_ADS7953)
+  if (devid == SPIDEV_USER(0))
+    {
+      /* ADC1 Chip Select */
+      stm32wl5_gpiowrite(GPIO_SPI2S2_NSS1, !selected);
+    }
+  else if (devid == SPIDEV_USER(1))
+    {
+      /* ADC2 Chip Select */
+      stm32wl5_gpiowrite(GPIO_SPI2S2_NSS2, !selected);
+    }
+    else if (devid == SPIDEV_USER(2))
+    {
+      /* MAG Chip Select */
+      stm32wl5_gpiowrite(GPIO_SPI2S2_NSS3, !selected);
+    }
+    else if (devid == SPIDEV_USER(3))
+    {
+      /* MPU Chip Select */
+      stm32wl5_gpiowrite(GPIO_SPI2S2_NSS4, !selected);
+    }
+#endif
 }
 
 uint8_t stm32wl5_spi2s2status(struct spi_dev_s *dev, uint32_t devid)
 {
+#if defined(CONFIG_ADC_ADS7953)
+  if (devid == SPIDEV_USER(0) || devid == SPIDEV_USER(1) || devid == SPIDEV_USER(2) || devid == SPIDEV_USER(3))
+    {
+      return SPI_STATUS_PRESENT;
+    }
+#endif
   return 0;
 }
 
@@ -235,6 +307,7 @@ int stm32_spi1cmddata(struct spi_dev_s *dev, uint32_t devid, bool cmd)
   return OK;
 }
 #endif
+
 
 #ifdef CONFIG_STM32_SPI2
 int stm32_spi2cmddata(struct spi_dev_s *dev, uint32_t devid, bool cmd)

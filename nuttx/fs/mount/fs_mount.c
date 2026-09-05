@@ -287,6 +287,7 @@ int nx_mount(FAR const char *source, FAR const char *target,
              FAR const char *filesystemtype, unsigned long mountflags,
              FAR const void *data)
 {
+  printf("starting nx mount\n");
 #if defined(BDFS_SUPPORT) || defined(MDFS_SUPPORT) || defined(NODFS_SUPPORT)
   FAR struct inode *drvr_inode = NULL;
   FAR struct inode *mountpt_inode = NULL;
@@ -300,7 +301,7 @@ int nx_mount(FAR const char *source, FAR const char *target,
   /* Verify required pointer arguments */
 
   DEBUGASSERT(target && filesystemtype);
-
+  printf("before find block driver\n");
   /* Find the specified filesystem. Try the block driver filesystems first */
 
   if (source != NULL && source[0] != '\0' &&
@@ -315,6 +316,7 @@ int nx_mount(FAR const char *source, FAR const char *target,
         {
           ferr("ERROR: Failed to find block based file system %s\n",
                filesystemtype);
+          printf("failed to find block based file system\n");
 
           ret = -ENODEV;
           goto errout_with_inode;
@@ -337,6 +339,7 @@ int nx_mount(FAR const char *source, FAR const char *target,
             {
               ferr("ERROR: Failed to find MTD based file system %s\n",
                    filesystemtype);
+              printf("failed to find MTD based file system\n");
 
               ret = -ENODEV;
               goto errout_with_inode;
@@ -359,11 +362,13 @@ int nx_mount(FAR const char *source, FAR const char *target,
   if ((mops = mount_findfs(g_nonbdfsmap, filesystemtype)) != NULL)
     {
       finfo("found %s\n", filesystemtype);
+      printf("found %s\n", filesystemtype);
     }
   else
 #endif /* NODFS_SUPPORT */
     {
       ferr("ERROR: Failed to find block driver %s\n", source);
+      printf("failed to find block driver\n");
 
       ret = -ENOTBLK;
       goto errout;
@@ -392,6 +397,7 @@ int nx_mount(FAR const char *source, FAR const char *target,
       if (!INODE_IS_PSEUDODIR(mountpt_inode))
         {
           ferr("ERROR: target %s exists and is a special node\n", target);
+          printf("ERROR:target exists and is a special node\n");
           ret = -ENOTDIR;
           inode_release(mountpt_inode);
           goto errout_with_lock;
@@ -409,6 +415,7 @@ int nx_mount(FAR const char *source, FAR const char *target,
       /* The filesystem does not support the bind operation ??? */
 
       ferr("ERROR: Filesystem does not support bind\n");
+      printf("ERROR: Filesystem does not support bind\n");
       ret = -EINVAL;
       goto errout_with_lock;
     }
