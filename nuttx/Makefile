@@ -40,12 +40,15 @@ else
 include tools/Unix.mk
 endif
 
+CPU2_DIR ?= $(shell if [ -d ../CPU2 ]; then echo ../CPU2; elif [ -d boards/arm/stm32wl5/nucleo-wl55jc/CPU2 ]; then echo boards/arm/stm32wl5/nucleo-wl55jc/CPU2; else echo CPU2; fi)
+
 flash_gs flash_GS:
-	$(MAKE) -C boards/arm/stm32wl5/nucleo-wl55jc/CPU2 flash_GS
+	$(MAKE) -C $(CPU2_DIR) flash_GS
 
 flash_sat flash_SAT:
-	$(MAKE) -C boards/arm/stm32wl5/nucleo-wl55jc/CPU2 flash_sat
+	$(MAKE) -C $(CPU2_DIR) flash_sat
 
 .PHONY: flash_gs flash_GS flash_sat flash_SAT
+
 endif
 
