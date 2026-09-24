@@ -1,26 +1,16 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "Sring_buffer.h"
 
-/*
- * ============================================================
- * Memory Barrier
- * ============================================================
- * Ensures shared-memory accesses are observed in the correct
- * order across Cortex-M4 and Cortex-M0+.
- */
 static inline void rb_memory_barrier(void)
 {
   __asm__ volatile ("dmb" ::: "memory");
 }
 
-/*
- * ============================================================
- * Standard CCITT-16 CRC Calculation (Polynomial 0x1021)
- * ============================================================
- */
+/* CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) */
 static uint16_t rb_calc_crc16(const uint8_t *data, uint16_t len)
 {
   uint16_t crc = 0xFFFF;
@@ -30,306 +20,215 @@ static uint16_t rb_calc_crc16(const uint8_t *data, uint16_t len)
       crc ^= (uint16_t)data[i] << 8;
       for (uint8_t bit = 0; bit < 8; bit++)
         {
-          if (crc & 0x8000)
-            {
-              crc = (crc << 1) ^ 0x1021;
-            }
-          else
-            {
-              crc <<= 1;
-            }
+          crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+                               : (uint16_t)(crc << 1);
         }
     }
 
   return crc;
 }
 
-/*
- * ============================================================
- * 1. IPC Subsystem Initialization (Called once by M4 at boot)
- * ============================================================
- */
+/* ============================================================
+ * Init (called once by M4 at boot)
+ * ============================================================ */
 void rb_ipc_init(void)
 {
-  /* If already initialized by launcher or previous task, keep intact */
   if (SHARED_RING_TX->magic == RING_TX_MAGIC &&
       SHARED_RING_RX->magic == RING_RX_MAGIC &&
-      LIVE_TELEM->magic == LIVE_TELEM_MAGIC &&
       SHARED_RADIO_LOG->magic == RADIO_LOG_MAGIC)
     {
       return;
     }
 
-  /* 1. Reset Live Telemetry Snapshot */
-  LIVE_TELEM->magic = 0;
-  rb_memory_barrier();
-
-  LIVE_TELEM->batt_voltage    = 3.80f;
-  LIVE_TELEM->sat_temperature = 20.0f;
-  LIVE_TELEM->batt_volt_mv    = 3800; /* Default 3.80V */
-  LIVE_TELEM->sat_temp_c_x10 = 200;  /* Default 20.0 C */
-  LIVE_TELEM->timestamp      = 0;
-  rb_memory_barrier();
-
-  LIVE_TELEM->magic = LIVE_TELEM_MAGIC;
-  rb_memory_barrier();
-
-  /* 2. Reset Ring Buffer 1 (TX: M4 -> M0+) */
+  /* TX ring */
   SHARED_RING_TX->magic = 0;
   rb_memory_barrier();
-
   SHARED_RING_TX->write_index = 0;
   SHARED_RING_TX->read_index  = 0;
-  SHARED_RING_TX->count       = 0;
   memset((void *)SHARED_RING_TX->slots, 0, sizeof(SHARED_RING_TX->slots));
   rb_memory_barrier();
-
   SHARED_RING_TX->magic = RING_TX_MAGIC;
-  rb_memory_barrier();
 
-  /* 3. Reset Ring Buffer 2 (RX: M0+ -> M4) */
+  /* RX ring */
   SHARED_RING_RX->magic = 0;
   rb_memory_barrier();
-
   SHARED_RING_RX->write_index = 0;
   SHARED_RING_RX->read_index  = 0;
-  SHARED_RING_RX->count       = 0;
   memset((void *)SHARED_RING_RX->slots, 0, sizeof(SHARED_RING_RX->slots));
   rb_memory_barrier();
-
   SHARED_RING_RX->magic = RING_RX_MAGIC;
-  rb_memory_barrier();
 
-  /* 4. Reset Radio Event Log (M0+ -> M4) */
+  /* Radio log */
   radio_log_init();
-}
 
-/*
- * ============================================================
- * 2. Live Telemetry Snapshot API
- * ============================================================
- */
-void live_telem_update_float(float batt_v, float sat_temp)
-{
-  LIVE_TELEM->batt_voltage    = batt_v;
-  LIVE_TELEM->sat_temperature = sat_temp;
-  LIVE_TELEM->batt_volt_mv    = (uint16_t)(batt_v * 1000.0f);
-  LIVE_TELEM->sat_temp_c_x10  = (int16_t)(sat_temp * 10.0f);
-  LIVE_TELEM->timestamp++;
   rb_memory_barrier();
 }
 
-bool live_telem_get_float(float *batt_v, float *sat_temp)
-{
-  if (LIVE_TELEM->magic != LIVE_TELEM_MAGIC)
-    {
-      return false;
-    }
-
-  if (batt_v)
-    {
-      *batt_v = LIVE_TELEM->batt_voltage;
-    }
-
-  if (sat_temp)
-    {
-      *sat_temp = LIVE_TELEM->sat_temperature;
-    }
-
-  return true;
-}
-
-void live_telem_update(uint16_t batt_mv, int16_t temp_c_x10)
-{
-  LIVE_TELEM->batt_voltage    = (float)batt_mv / 1000.0f;
-  LIVE_TELEM->sat_temperature = (float)temp_c_x10 / 10.0f;
-  LIVE_TELEM->batt_volt_mv    = batt_mv;
-  LIVE_TELEM->sat_temp_c_x10  = temp_c_x10;
-  LIVE_TELEM->timestamp++;
-  rb_memory_barrier();
-}
-
-bool live_telem_get(uint16_t *batt_mv, int16_t *temp_c_x10)
-{
-  if (LIVE_TELEM->magic != LIVE_TELEM_MAGIC)
-    {
-      return false;
-    }
-
-  if (batt_mv)
-    {
-      *batt_mv = LIVE_TELEM->batt_volt_mv;
-    }
-
-  if (temp_c_x10)
-    {
-      *temp_c_x10 = LIVE_TELEM->sat_temp_c_x10;
-    }
-
-  return true;
-}
-
-/*
- * ============================================================
- * 3. Ring Buffer 1: TX (M4 -> M0+) API
- * ============================================================
- */
-static inline bool rb_tx_valid(void)
-{
-  return (SHARED_RING_TX->magic == RING_TX_MAGIC) &&
-         (SHARED_RING_TX->write_index < RING_TX_DEPTH) &&
-         (SHARED_RING_TX->read_index < RING_TX_DEPTH) &&
-         (SHARED_RING_TX->count <= RING_TX_DEPTH);
-}
-
+/* ============================================================
+ * TX ring: beacon id + 5 scaled integers (M4 -> M0+)
+ * Empty: read == write.  Full: (write + 1) % DEPTH == read.
+ * ============================================================ */
 bool rb_tx_empty(void)
 {
-  if (!rb_tx_valid())
+  if (SHARED_RING_TX->magic != RING_TX_MAGIC)
     {
       return true;
     }
-  return SHARED_RING_TX->count == 0U;
+
+  return SHARED_RING_TX->read_index == SHARED_RING_TX->write_index;
 }
 
 bool rb_tx_full(void)
 {
-  if (!rb_tx_valid())
-    {
-      return false;
-    }
-  return SHARED_RING_TX->count >= RING_TX_DEPTH;
-}
-
-uint32_t rb_tx_available(void)
-{
-  if (!rb_tx_valid())
-    {
-      return 0;
-    }
-  return SHARED_RING_TX->count;
-}
-
-bool rb_tx_write(const struct tx_packet_s *pkt)
-{
-  if (!pkt || !rb_tx_valid() || rb_tx_full())
+  if (SHARED_RING_TX->magic != RING_TX_MAGIC)
     {
       return false;
     }
 
-  uint32_t idx = SHARED_RING_TX->write_index;
+  return ((SHARED_RING_TX->write_index + 1U) % RING_TX_DEPTH) ==
+         SHARED_RING_TX->read_index;
+}
 
-  /* Copy packet and compute CRC */
-  SHARED_RING_TX->slots[idx].type = pkt->type;
-  SHARED_RING_TX->slots[idx].len  = (pkt->len > RING_TX_PAYLOAD_MAX) ? RING_TX_PAYLOAD_MAX : pkt->len;
-  memcpy((void *)SHARED_RING_TX->slots[idx].data, pkt->data, SHARED_RING_TX->slots[idx].len);
-  SHARED_RING_TX->slots[idx].crc16 = rb_calc_crc16(pkt->data, SHARED_RING_TX->slots[idx].len);
+/* M4 side. seq increments on EVERY call (even if the ring is full),
+ * so gaps in seq on the M0+ side reveal dropped packets. */
+bool live_telem_update_float(uint16_t beacon_id,
+                             int16_t d1, int16_t d2, int16_t d3,
+                             int16_t d4, int16_t d5)
+{
+  static uint16_t s_seq = 0;
+  uint16_t seq = s_seq++;
+
+  if (SHARED_RING_TX->magic != RING_TX_MAGIC || rb_tx_full())
+    {
+      return false;
+    }
+
+  struct tx_packet_s p;
+  p.data[0] = d1;
+  p.data[1] = d2;
+  p.data[2] = d3;
+  p.data[3] = d4;
+  p.data[4] = d5;
+  p.id      = beacon_id;
+  p.seq     = seq;
+  p.crc16   = rb_calc_crc16((const uint8_t *)&p,
+                            offsetof(struct tx_packet_s, crc16));
+
+  uint32_t idx = SHARED_RING_TX->write_index % RING_TX_DEPTH;
+  memcpy((void *)&SHARED_RING_TX->slots[idx], &p, sizeof(p));
 
   rb_memory_barrier();
 
-  /* Advance write index atomically */
-  SHARED_RING_TX->write_index = (idx + 1) % RING_TX_DEPTH;
-  SHARED_RING_TX->count++;
+  SHARED_RING_TX->write_index = (idx + 1U) % RING_TX_DEPTH;
 
   rb_memory_barrier();
+
+  ipcc_m4_send(IPCC_CH_BEACON);   /* notify M0+ */
   return true;
 }
 
+/* M0+ side. Reads one slot and always consumes it.
+ * Returns false if empty or CRC error. */
 bool rb_tx_read(struct tx_packet_s *pkt)
 {
-  if (!pkt || !rb_tx_valid() || rb_tx_empty())
+  if (!pkt || rb_tx_empty())
     {
       return false;
     }
 
-  uint32_t idx = SHARED_RING_TX->read_index;
+  uint32_t idx = SHARED_RING_TX->read_index % RING_TX_DEPTH;
+  memcpy(pkt, (const void *)&SHARED_RING_TX->slots[idx], sizeof(*pkt));
 
-  /* Verify CRC before consuming */
-  uint16_t computed_crc = rb_calc_crc16((const uint8_t *)SHARED_RING_TX->slots[idx].data,
-                                        SHARED_RING_TX->slots[idx].len);
-  if (computed_crc != SHARED_RING_TX->slots[idx].crc16)
+  rb_memory_barrier();
+
+  SHARED_RING_TX->read_index = (idx + 1U) % RING_TX_DEPTH;
+
+  rb_memory_barrier();
+
+  return rb_calc_crc16((const uint8_t *)pkt,
+                       offsetof(struct tx_packet_s, crc16)) == pkt->crc16;
+}
+
+/* M0+ side. Drain everything, keep the newest valid packet. */
+bool live_telem_get_float(uint16_t *id,
+                          int16_t *d1, int16_t *d2, int16_t *d3,
+                          int16_t *d4, int16_t *d5)
+{
+  struct tx_packet_s pkt;
+  struct tx_packet_s last;
+  bool got = false;
+
+  if (ipcc_m0_received(IPCC_CH_BEACON))
     {
-      /* CRC corrupted by bit-flip! Drop corrupted packet */
-      SHARED_RING_TX->read_index = (idx + 1) % RING_TX_DEPTH;
-      SHARED_RING_TX->count--;
-      rb_memory_barrier();
+      ipcc_m0_clear(IPCC_CH_BEACON);
+    }
+
+  while (!rb_tx_empty())
+    {
+      if (rb_tx_read(&pkt))
+        {
+          last = pkt;
+          got  = true;
+        }
+    }
+
+  if (!got)
+    {
+      if (id) { *id = 0; }
       return false;
     }
 
-  /* Copy packet out */
-  pkt->type  = SHARED_RING_TX->slots[idx].type;
-  pkt->len   = SHARED_RING_TX->slots[idx].len;
-  memcpy(pkt->data, (const void *)SHARED_RING_TX->slots[idx].data, pkt->len);
-  pkt->crc16 = SHARED_RING_TX->slots[idx].crc16;
+  if (id) { *id = last.id; }
+  if (d1) { *d1 = last.data[0]; }
+  if (d2) { *d2 = last.data[1]; }
+  if (d3) { *d3 = last.data[2]; }
+  if (d4) { *d4 = last.data[3]; }
+  if (d5) { *d5 = last.data[4]; }
 
-  rb_memory_barrier();
-
-  /* Advance read index atomically */
-  SHARED_RING_TX->read_index = (idx + 1) % RING_TX_DEPTH;
-  SHARED_RING_TX->count--;
-
-  rb_memory_barrier();
   return true;
 }
 
-/*
- * ============================================================
- * 4. Ring Buffer 2: RX (M0+ -> M4) API
- * ============================================================
- */
-static inline bool rb_rx_valid(void)
-{
-  return (SHARED_RING_RX->magic == RING_RX_MAGIC) &&
-         (SHARED_RING_RX->write_index < RING_RX_DEPTH) &&
-         (SHARED_RING_RX->read_index < RING_RX_DEPTH) &&
-         (SHARED_RING_RX->count <= RING_RX_DEPTH);
-}
-
+/* ============================================================
+ * RX ring: commands (M0+ -> M4)
+ * ============================================================ */
 bool rb_rx_empty(void)
 {
-  if (!rb_rx_valid())
+  if (SHARED_RING_RX->magic != RING_RX_MAGIC)
     {
       return true;
     }
-  return SHARED_RING_RX->count == 0U;
+
+  return SHARED_RING_RX->read_index == SHARED_RING_RX->write_index;
 }
 
 bool rb_rx_full(void)
 {
-  if (!rb_rx_valid())
+  if (SHARED_RING_RX->magic != RING_RX_MAGIC)
     {
       return false;
     }
-  return SHARED_RING_RX->count >= RING_RX_DEPTH;
-}
 
-uint32_t rb_rx_available(void)
-{
-  if (!rb_rx_valid())
-    {
-      return 0;
-    }
-  return SHARED_RING_RX->count;
+  return ((SHARED_RING_RX->write_index + 1U) % RING_RX_DEPTH) ==
+         SHARED_RING_RX->read_index;
 }
 
 bool rb_rx_write(const struct rx_command_s *cmd)
 {
-  if (!cmd || !rb_rx_valid() || rb_rx_full())
+  if (!cmd || SHARED_RING_RX->magic != RING_RX_MAGIC || rb_rx_full())
     {
       return false;
     }
 
-  uint32_t idx = SHARED_RING_RX->write_index;
+  uint32_t idx = SHARED_RING_RX->write_index % RING_RX_DEPTH;
+  volatile struct rx_command_s *slot = &SHARED_RING_RX->slots[idx];
 
-  /* Copy 13-byte command and calculate CRC */
-  SHARED_RING_RX->slots[idx].len = CMD_PAYLOAD_LEN;
-  memcpy((void *)SHARED_RING_RX->slots[idx].cmd, cmd->cmd, CMD_PAYLOAD_LEN);
-  SHARED_RING_RX->slots[idx].crc16 = rb_calc_crc16(cmd->cmd, CMD_PAYLOAD_LEN);
+  slot->len = CMD_PAYLOAD_LEN;
+  memcpy((void *)slot->cmd, cmd->cmd, CMD_PAYLOAD_LEN);
+  slot->crc16 = rb_calc_crc16(cmd->cmd, CMD_PAYLOAD_LEN);
 
   rb_memory_barrier();
 
-  /* Advance write index */
-  SHARED_RING_RX->write_index = (idx + 1) % RING_RX_DEPTH;
-  SHARED_RING_RX->count++;
+  SHARED_RING_RX->write_index = (idx + 1U) % RING_RX_DEPTH;
 
   rb_memory_barrier();
   return true;
@@ -337,44 +236,31 @@ bool rb_rx_write(const struct rx_command_s *cmd)
 
 bool rb_rx_read(struct rx_command_s *cmd)
 {
-  if (!cmd || !rb_rx_valid() || rb_rx_empty())
+  if (!cmd || rb_rx_empty())
     {
       return false;
     }
 
-  uint32_t idx = SHARED_RING_RX->read_index;
-
-  /* Check CRC for bit-flip protection */
-  uint16_t computed_crc = rb_calc_crc16((const uint8_t *)SHARED_RING_RX->slots[idx].cmd,
-                                        CMD_PAYLOAD_LEN);
-  if (computed_crc != SHARED_RING_RX->slots[idx].crc16)
-    {
-      /* Corrupt command dropped */
-      SHARED_RING_RX->read_index = (idx + 1) % RING_RX_DEPTH;
-      SHARED_RING_RX->count--;
-      rb_memory_barrier();
-      return false;
-    }
+  uint32_t idx = SHARED_RING_RX->read_index % RING_RX_DEPTH;
+  volatile struct rx_command_s *slot = &SHARED_RING_RX->slots[idx];
 
   cmd->len = CMD_PAYLOAD_LEN;
-  memcpy(cmd->cmd, (const void *)SHARED_RING_RX->slots[idx].cmd, CMD_PAYLOAD_LEN);
-  cmd->crc16 = SHARED_RING_RX->slots[idx].crc16;
+  memcpy(cmd->cmd, (const void *)slot->cmd, CMD_PAYLOAD_LEN);
+  cmd->crc16 = slot->crc16;
 
   rb_memory_barrier();
 
-  /* Advance read index */
-  SHARED_RING_RX->read_index = (idx + 1) % RING_RX_DEPTH;
-  SHARED_RING_RX->count--;
+  SHARED_RING_RX->read_index = (idx + 1U) % RING_RX_DEPTH;
 
   rb_memory_barrier();
-  return true;
+
+  return rb_calc_crc16(cmd->cmd, CMD_PAYLOAD_LEN) == cmd->crc16;
 }
 
-/*
- * ============================================================
- * 5. Radio Event Log (M0+ -> M4) API
- * ============================================================
- */
+/* ============================================================
+ * Radio event log (M0+ -> M4)
+ * Drops the newest message when full (keeps SPSC ownership clean).
+ * ============================================================ */
 void radio_log_init(void)
 {
   SHARED_RADIO_LOG->magic = 0;
@@ -382,7 +268,6 @@ void radio_log_init(void)
 
   SHARED_RADIO_LOG->write_index = 0;
   SHARED_RADIO_LOG->read_index  = 0;
-  SHARED_RADIO_LOG->count       = 0;
   memset((void *)SHARED_RADIO_LOG->slots, 0, sizeof(SHARED_RADIO_LOG->slots));
   rb_memory_barrier();
 
@@ -396,16 +281,8 @@ bool radio_log_empty(void)
     {
       return true;
     }
-  return SHARED_RADIO_LOG->count == 0U;
-}
 
-uint32_t radio_log_available(void)
-{
-  if (SHARED_RADIO_LOG->magic != RADIO_LOG_MAGIC)
-    {
-      return 0;
-    }
-  return SHARED_RADIO_LOG->count;
+  return SHARED_RADIO_LOG->read_index == SHARED_RADIO_LOG->write_index;
 }
 
 bool radio_log_write(uint8_t event_type, const char *msg)
@@ -415,25 +292,23 @@ bool radio_log_write(uint8_t event_type, const char *msg)
       return false;
     }
 
-  uint32_t idx = SHARED_RADIO_LOG->write_index;
+  uint32_t idx = SHARED_RADIO_LOG->write_index % RADIO_LOG_DEPTH;
 
-  SHARED_RADIO_LOG->slots[idx].event_type = event_type;
-  SHARED_RADIO_LOG->slots[idx].timestamp_ms = 0;
-  strncpy((char *)SHARED_RADIO_LOG->slots[idx].text, msg, RADIO_LOG_TEXT_MAX - 1);
-  SHARED_RADIO_LOG->slots[idx].text[RADIO_LOG_TEXT_MAX - 1] = '\0';
+  if (((idx + 1U) % RADIO_LOG_DEPTH) == SHARED_RADIO_LOG->read_index)
+    {
+      return false; /* full */
+    }
+
+  volatile struct radio_log_msg_s *slot = &SHARED_RADIO_LOG->slots[idx];
+
+  slot->event_type   = event_type;
+  slot->timestamp_ms = 0;
+  strncpy((char *)slot->text, msg, RADIO_LOG_TEXT_MAX - 1);
+  slot->text[RADIO_LOG_TEXT_MAX - 1] = '\0';
 
   rb_memory_barrier();
 
-  SHARED_RADIO_LOG->write_index = (idx + 1) % RADIO_LOG_DEPTH;
-  if (SHARED_RADIO_LOG->count < RADIO_LOG_DEPTH)
-    {
-      SHARED_RADIO_LOG->count++;
-    }
-  else
-    {
-      /* Drop oldest slot if buffer is full */
-      SHARED_RADIO_LOG->read_index = (SHARED_RADIO_LOG->read_index + 1) % RADIO_LOG_DEPTH;
-    }
+  SHARED_RADIO_LOG->write_index = (idx + 1U) % RADIO_LOG_DEPTH;
 
   rb_memory_barrier();
   return true;
@@ -441,22 +316,22 @@ bool radio_log_write(uint8_t event_type, const char *msg)
 
 bool radio_log_read(struct radio_log_msg_s *msg)
 {
-  if (!msg || SHARED_RADIO_LOG->magic != RADIO_LOG_MAGIC || SHARED_RADIO_LOG->count == 0U)
+  if (!msg || radio_log_empty())
     {
       return false;
     }
 
-  uint32_t idx = SHARED_RADIO_LOG->read_index;
+  uint32_t idx = SHARED_RADIO_LOG->read_index % RADIO_LOG_DEPTH;
+  volatile struct radio_log_msg_s *slot = &SHARED_RADIO_LOG->slots[idx];
 
-  msg->event_type   = SHARED_RADIO_LOG->slots[idx].event_type;
-  msg->timestamp_ms = SHARED_RADIO_LOG->slots[idx].timestamp_ms;
-  strncpy(msg->text, (const char *)SHARED_RADIO_LOG->slots[idx].text, RADIO_LOG_TEXT_MAX);
+  msg->event_type   = slot->event_type;
+  msg->timestamp_ms = slot->timestamp_ms;
+  strncpy(msg->text, (const char *)slot->text, RADIO_LOG_TEXT_MAX - 1);
   msg->text[RADIO_LOG_TEXT_MAX - 1] = '\0';
 
   rb_memory_barrier();
 
-  SHARED_RADIO_LOG->read_index = (idx + 1) % RADIO_LOG_DEPTH;
-  SHARED_RADIO_LOG->count--;
+  SHARED_RADIO_LOG->read_index = (idx + 1U) % RADIO_LOG_DEPTH;
 
   rb_memory_barrier();
   return true;

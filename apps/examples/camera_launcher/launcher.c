@@ -27,6 +27,7 @@
 #include <nuttx/config.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <sched.h>
 #include <telemetry_rb.h>
@@ -82,8 +83,8 @@ int launcher_main(int argc, char *argv[])
   telemetry_rb_init();
   rb_ipc_init();
 
-  /* 2. Handshake with Cortex-M0+ (CPU2) via IPCC Channel 3 */
-  printf("[LAUNCHER] [IPC] Performing initial handshake with Cortex-M0+ (IPCC CH3)...\n");
+  /* 2. Handshake with Cortex-M0+ (CPU2) via IPCC Channel 1 */
+  printf("[LAUNCHER] [IPC] Performing initial handshake with Cortex-M0+ (IPCC CH1)...\n");
 
   ipcc_m4_clear(IPCC_CH_HANDSHAKE);
 
@@ -175,5 +176,11 @@ int launcher_main(int argc, char *argv[])
   printf("  Subsystem Launch Complete! (Services running in background)\n");
   printf("=======================================================\n\n");
 
+#ifdef CONFIG_SYSTEM_NSH
+  /* Hand over the console to the interactive NSH shell */
+  extern int nsh_consolemain(int argc, char *argv[]);
+  return nsh_consolemain(argc, argv);
+#else
   return 0;
+#endif
 }

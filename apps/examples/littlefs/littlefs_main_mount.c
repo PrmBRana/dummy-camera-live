@@ -7,6 +7,35 @@
  ****************************************************************************/
 
 /****************************************************************************
+ * Overview
+ *
+ *   This file talks to the SPI NOR flash on SPI1 (MT25Q family), mounted
+ *   as three LittleFS partitions:
+ *
+ *     /dev/hk1     -> /mnt/hk1     ADC1 housekeeping telemetry (34B/pkt)
+ *     /dev/hk2     -> /mnt/hk2     ADC2 + IMU housekeeping telemetry (38B/pkt)
+ *     /dev/camera  -> /mnt/camera  Captured camera frames
+ *
+ *   It has two roles:
+ *
+ *     1. Low-level flash bring-up / self-test helpers (init_spi,
+ *        read_flash_id, read_flash_status, write/erase commands,
+ *        littlefs_hardware_test) used to validate the SPI link and the
+ *        flash chip before trusting it with real telemetry.
+ *
+ *     2. The `littlefs_telemetry_daemon`, which is the storage consumer
+ *        for OBC_main.c's telemetry producer: it blocks on
+ *        g_telemetry_sem, drains packets from the shared ring buffer
+ *        (telemetry_rb_read), and appends each one to the matching
+ *        LittleFS file, verifying every write with an immediate
+ *        read-back.
+ *
+ *   `littlefs_main` is the NSH-callable entry point: with no arguments it
+ *   runs the daemon; with "read"/"clean"/"format" [hk1|hk2|camera] it
+ *   performs the corresponding one-shot maintenance operation instead.
+ ****************************************************************************/
+
+/****************************************************************************
  * Included Files
  ****************************************************************************/
 
@@ -29,19 +58,24 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define SPI_PORT          1          /* Using SPI1 */
-#define SPI_FREQUENCY     20000000   /* 20 MHz */
-#define ERASE_4KB         0x20       /* 4KB Sector Erase command */
-#define ERASE_32KB        0x52       /* 32KB Block Erase command */
-#define ERASE_64KB        0xD8       /* 64KB Block Erase command */
-#define ERASE_ALL         0xC7       /* Chip Erase command (128MB erase)*/
-#define Die_erase          0xC4       /* Die Erase command (64MB erase) */
+#define SPI_PORT          1          /* Using SPI1                        */
+#define SPI_FREQUENCY     20000000   /* 20 MHz                            */
 
+/* MT25Q-family SPI NOR flash opcodes used by the erase helpers below */
+
+#define ERASE_4KB         0x20       /* 4KB Sector Erase command          */
+#define ERASE_32KB        0x52       /* 32KB Block Erase command          */
+#define ERASE_64KB        0xD8       /* 64KB Block Erase command          */
+#define ERASE_ALL         0xC7       /* Chip Erase command (128MB erase)  */
+#define Die_erase          0xC4      /* Die Erase command (64MB erase)    */
+
+#define HK_Download_Cmd 53 01 1D D1 F2
 /****************************************************************************
  * Forward Declarations
  ****************************************************************************/
 
-/* Architecture-specific SPI bus initialization function */
+/* Board-specific SPI bus initialization (implemented in board.c) */
+
 FAR struct spi_dev_s *stm32wl5_spibus_initialize(int bus);
 
 /****************************************************************************
@@ -52,8 +86,8 @@ FAR struct spi_dev_s *stm32wl5_spibus_initialize(int bus);
  * Name: init_spi
  *
  * Description:
- *   Initializes SPI1 and configures Mode 0, 8-bit width, and 20 MHz clock.
- *
+ *   Initialize the given SPI bus and configure it for the flash chip:
+ *   Mode 0, 8-bit frames, 20 MHz clock.
  ****************************************************************************/
 
 static FAR struct spi_dev_s *init_spi(int bus)
@@ -85,18 +119,24 @@ static FAR struct spi_dev_s *init_spi(int bus)
 }
 
 /****************************************************************************
- *Read ID of MT25Q Flash Memory
+ * Name: read_flash_id
+ *
+ * Description:
+ *   Read and print the MT25Q flash's JEDEC ID (command 0x9F: manufacturer
+ *   ID, memory type, capacity code).  Command 0x9E reads the same fields
+ *   plus extended data, if ever needed.
  ****************************************************************************/
+
 static int read_flash_id(FAR struct spi_dev_s *spi)
 {
-  uint8_t cmd = 0x9F; /* Read ID command you can use 9E or 9F command */
+  uint8_t cmd = 0x9F; /* Read ID (JEDEC ID) command */
   uint8_t id[3] = {0};
 
   SPI_LOCK(spi, true);
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), true);
 
   /* Send the Read ID command */
-  SPI_SEND(spi, cmd);          
+  SPI_SEND(spi, cmd);
 
   /* Receive the ID bytes */
   SPI_RECVBLOCK(spi, id, sizeof(id));
@@ -107,11 +147,16 @@ static int read_flash_id(FAR struct spi_dev_s *spi)
   printf("Manufacture ID: %02X, Memory Type: %02X, Capacity: %02X\n", id[0], id[1], id[2]);
   return OK;
 }
+
 /****************************************************************************
- * Flash Read Status Register
- * If 0 = Ready/idle
- * 1f 1 = Busy or erasing or writing
+ * Name: read_flash_status
+ *
+ * Description:
+ *   Read the flash's Status Register (command 0x05).  Bit 0 (WIP -
+ *   "write in progress") is 0 when the flash is idle/ready and 1 while
+ *   it is busy erasing or writing.
  ****************************************************************************/
+
 static int read_flash_status(FAR struct spi_dev_s *spi)
 {
   uint8_t cmd = 0x05; /* Read Status Register command */
@@ -122,10 +167,11 @@ static int read_flash_status(FAR struct spi_dev_s *spi)
 
   /* Send the Read Status Register command */
   SPI_SEND(spi, cmd);
-  
-  status = SPI_SEND(spi, 0xAA); /* Send dummy byte to receive status because Mode 0 receive only after sending (first shift then sample) */
 
-  /* Receive the status byte */
+  /* Mode 0 only shifts a byte out in response to a byte sent in, so a
+   * dummy byte must be clocked out to receive the status byte back.
+   */
+  status = SPI_SEND(spi, 0xAA);
 
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), false);
   SPI_LOCK(spi, false);
@@ -133,10 +179,16 @@ static int read_flash_status(FAR struct spi_dev_s *spi)
   printf("Read Flash Status Register: %02X\n", status);
   return status;
 }
+
 /****************************************************************************
- * Flash Write Enable
- * command: 06h
+ * Name: write_flash_enable
+ *
+ * Description:
+ *   Send the Write Enable command (0x06).  Required before any
+ *   program/erase command; the flash clears this latch automatically
+ *   after the operation completes.
  ****************************************************************************/
+
 static int write_flash_enable(FAR struct spi_dev_s *spi)
 {
   uint8_t cmd = 0x06; /* Write Enable command */
@@ -144,7 +196,6 @@ static int write_flash_enable(FAR struct spi_dev_s *spi)
   SPI_LOCK(spi, true);
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), true);
 
-  /* Send the Write Enable command */
   SPI_SEND(spi, cmd);
 
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), false);
@@ -153,10 +204,15 @@ static int write_flash_enable(FAR struct spi_dev_s *spi)
   printf("Flash Write Enable command sent.\n");
   return OK;
 }
+
 /****************************************************************************
- * Flash Write Disable
- * command: 04h
+ * Name: write_flash_disable
+ *
+ * Description:
+ *   Send the Write Disable command (0x04), clearing the write-enable
+ *   latch set by write_flash_enable().
  ****************************************************************************/
+
 static int write_flash_disable(FAR struct spi_dev_s *spi)
 {
   uint8_t cmd = 0x04; /* Write Disable command */
@@ -164,7 +220,6 @@ static int write_flash_disable(FAR struct spi_dev_s *spi)
   SPI_LOCK(spi, true);
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), true);
 
-  /* Send the Write Disable command */
   SPI_SEND(spi, cmd);
 
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), false);
@@ -173,9 +228,14 @@ static int write_flash_disable(FAR struct spi_dev_s *spi)
   printf("Flash Write Disable command sent.\n");
   return OK;
 }
+
 /****************************************************************************
- * 4KB Sector Erase
- *command is 0x20
+ * Name: erase_flash_4kb
+ *
+ * Description:
+ *   Erase a single 4KB sector at `address` (command 0x20) and poll the
+ *   status register until the operation completes or times out
+ *   (~5 seconds).
  ****************************************************************************/
 
 static int erase_flash_4kb(FAR struct spi_dev_s *spi, uint32_t address)
@@ -190,10 +250,10 @@ static int erase_flash_4kb(FAR struct spi_dev_s *spi, uint32_t address)
   cmd[2] = (address >> 8)  & 0xFF; /* Address byte 2 */
   cmd[3] = address & 0xFF;         /* Address byte 3 (LSB) */
 
-  /* 1. MUST enable write FIRST (separate transaction) */
+  /* 1. Write Enable MUST be sent first, as its own transaction */
   write_flash_enable(spi);
 
-  /* 2. Send Erase command and address together */
+  /* 2. Send the erase command and address together */
   SPI_LOCK(spi, true);
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), true);
 
@@ -204,34 +264,33 @@ static int erase_flash_4kb(FAR struct spi_dev_s *spi, uint32_t address)
 
   printf("Flash Erase command sent for address: 0x%06lX\n", (unsigned long)address);
 
-  /* 3. Wait for erase to finish (poll Bit 0 WIP until it drops to 0) */
-  printf("Waiting for erase to complete...\n");
-  
-
+  /* 3. Poll the status register (WIP bit) until the erase finishes */
   printf("Waiting for erase to complete...\n");
   do
     {
-      usleep(1000);  /* Sleep 10ms so CPU can breathe */
+      usleep(1000);  /* 1 ms so the CPU can breathe between polls */
       count++;
       status = read_flash_status(spi);
     }
   while ((status & 0x01) && (count < max_retries_4kb));
 
-  /* If we reached max_retries and it is STILL busy, it timed out! */
   if (count >= max_retries_4kb)
     {
       printf("RESULT: [FAIL] Erase timed out after %d retries!\n", count);
       return -ETIMEDOUT;
     }
 
-  printf("RESULT: [PASS] 4KB Erase completed in %d iterations (~%d ms)!\n", 
+  printf("RESULT: [PASS] 4KB Erase completed in %d iterations (~%d ms)!\n",
          count, count * 10);
   return OK;
-
 }
+
 /****************************************************************************
- * Flash 32KB Block Erase
- *command is 0x52
+ * Name: erase_flash_32kb
+ *
+ * Description:
+ *   Erase a single 32KB block at `address` (command 0x52) and poll the
+ *   status register until complete or timed out (~1 second).
  ****************************************************************************/
 
 static int erase_flash_32kb(FAR struct spi_dev_s *spi, uint32_t address)
@@ -246,10 +305,8 @@ static int erase_flash_32kb(FAR struct spi_dev_s *spi, uint32_t address)
   cmd[2] = (address >> 8)  & 0xFF;
   cmd[3] = address & 0xFF;
 
-  /* 1. Write Enable */
   write_flash_enable(spi);
 
-  /* 2. Send 0x52 + address */
   SPI_LOCK(spi, true);
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), true);
   SPI_SNDBLOCK(spi, cmd, sizeof(cmd));
@@ -258,7 +315,6 @@ static int erase_flash_32kb(FAR struct spi_dev_s *spi, uint32_t address)
 
   printf("Erasing 32KB at address 0x%06lX...\n", (unsigned long)address);
 
-  /* 3. Wait for completion (max 100 iterations = 1s) */
   do
     {
       usleep(1000); /* 1ms */
@@ -276,9 +332,13 @@ static int erase_flash_32kb(FAR struct spi_dev_s *spi, uint32_t address)
   printf("RESULT: [PASS] 32KB Erased in ~%d ms!\n", count * 10);
   return OK;
 }
+
 /****************************************************************************
- * Flash 64KB Block Erase
- *command is 0xD8
+ * Name: erase_flash_64kb
+ *
+ * Description:
+ *   Erase a single 64KB sector at `address` (command 0xD8) and poll the
+ *   status register until complete or timed out (~2 seconds).
  ****************************************************************************/
 
 static int erase_flash_64kb(FAR struct spi_dev_s *spi, uint32_t address)
@@ -293,10 +353,8 @@ static int erase_flash_64kb(FAR struct spi_dev_s *spi, uint32_t address)
   cmd[2] = (address >> 8)  & 0xFF;
   cmd[3] = address & 0xFF;
 
-  /* 1. Write Enable */
   write_flash_enable(spi);
 
-  /* 2. Send 0xD8 + address */
   SPI_LOCK(spi, true);
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), true);
   SPI_SNDBLOCK(spi, cmd, sizeof(cmd));
@@ -305,7 +363,6 @@ static int erase_flash_64kb(FAR struct spi_dev_s *spi, uint32_t address)
 
   printf("Erasing 64KB sector at address 0x%06lX...\n", (unsigned long)address);
 
-  /* 3. Wait for completion (max 2s) */
   do
     {
       usleep(10000); /* 10ms */
@@ -323,9 +380,14 @@ static int erase_flash_64kb(FAR struct spi_dev_s *spi, uint32_t address)
   printf("RESULT: [PASS] 64KB Erased in ~%d ms!\n", count * 10);
   return OK;
 }
+
 /****************************************************************************
- * Flash Chip Erase (128MB)
- *command is 0xC7
+ * Name: erase_flash_all
+ *
+ * Description:
+ *   Erase the entire 128MB flash chip (command 0xC7, no address bytes).
+ *   Takes several minutes; polls the status register with a heartbeat
+ *   dot printed once per second, up to an ~8 minute timeout.
  ****************************************************************************/
 
 static int erase_flash_all(FAR struct spi_dev_s *spi)
@@ -336,17 +398,16 @@ static int erase_flash_all(FAR struct spi_dev_s *spi)
 
   printf("WARNING: Erasing ENTIRE 128MB Flash Chip (takes ~2-4 minutes)...\n");
 
-  /* 1. Write Enable */
   write_flash_enable(spi);
 
-  /* 2. Send ONLY 0xC7 (No address bytes!) */
+  /* Send ONLY the opcode: chip erase takes no address bytes */
+
   SPI_LOCK(spi, true);
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), true);
   SPI_SEND(spi, ERASE_ALL);
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), false);
   SPI_LOCK(spi, false);
 
-  /* 3. Wait with heartbeat dots */
   do
     {
       sleep(1); /* 1 second */
@@ -368,9 +429,14 @@ static int erase_flash_all(FAR struct spi_dev_s *spi)
   printf("RESULT: [PASS] Entire 128MB Chip Erased in %d seconds!\n", seconds);
   return OK;
 }
+
 /****************************************************************************
- * Flash Die Erase (64MB)
- *command is 0xC4
+ * Name: erase_flash_die
+ *
+ * Description:
+ *   Erase a single 64MB die at `address` (command 0xC4).  Polls the
+ *   status register with a heartbeat dot printed once per second, up to
+ *   an ~5 minute timeout.
  ****************************************************************************/
 
 static int erase_flash_die(FAR struct spi_dev_s *spi, uint32_t address)
@@ -393,10 +459,9 @@ static int erase_flash_die(FAR struct spi_dev_s *spi, uint32_t address)
   SPI_SELECT(spi, SPIDEV_MAIN_FLASH(0), false);
   SPI_LOCK(spi, false);
 
-  printf("Erasing 64MB Die for address 0x%06lX (takes ~1-2 minutes)...\n", 
+  printf("Erasing 64MB Die for address 0x%06lX (takes ~1-2 minutes)...\n",
          (unsigned long)address);
 
-  /* Sleep 1 second at a time, print '.' heartbeat */
   do
     {
       sleep(1); /* 1 second */
@@ -418,10 +483,22 @@ static int erase_flash_die(FAR struct spi_dev_s *spi, uint32_t address)
   printf("RESULT: [PASS] 64MB Die Erased in %d seconds!\n", seconds);
   return OK;
 }
+
 /****************************************************************************
- * LittleFS mount code
+ * Name: mount_drive
  *
+ * Description:
+ *   Mount a LittleFS partition, creating the mount point directory if
+ *   needed.  Tries "autoformat" first (mounts an existing filesystem, or
+ *   formats only if the partition is blank); if that fails for a reason
+ *   other than "already mounted", falls back to "forceformat" to
+ *   guarantee a clean, mountable filesystem.
+ *
+ * Returned Value:
+ *   OK on success (including "already mounted"), negative errno on
+ *   failure.
  ****************************************************************************/
+
 static int mount_drive(FAR const char *dev_path, FAR const char *mount_path)
 {
   struct stat st;
@@ -441,7 +518,7 @@ static int mount_drive(FAR const char *dev_path, FAR const char *mount_path)
     {
       if (errno == EBUSY || errno == ENOTDIR || errno == EEXIST)
         {
-          /* Already mounted, perfectly normal */
+          /* Already mounted: perfectly normal, not an error */
           return OK;
         }
 
@@ -466,12 +543,10 @@ static int mount_drive(FAR const char *dev_path, FAR const char *mount_path)
 }
 
 /****************************************************************************
- * LittleFS unmount code
- *
- ****************************************************************************/
-/****************************************************************************
  * Name: unmount_drive
- * Description: Safely flushes and unmounts the LittleFS filesystem.
+ *
+ * Description:
+ *   Safely flush and unmount the LittleFS filesystem at `mount_path`.
  ****************************************************************************/
 
 static int unmount_drive(FAR const char *mount_path)
@@ -491,8 +566,15 @@ static int unmount_drive(FAR const char *mount_path)
   return OK;
 }
 
+static int clean_one_partition(FAR const char *dev_path, FAR const char *mount_path);
+
 /****************************************************************************
  * Name: format_one_partition
+ *
+ * Description:
+ *   Unconditionally reformat one partition ("forceformat"), discarding
+ *   any existing contents. If partition is in use by telemetry daemon,
+ *   falls back to wiping all files on the partition.
  ****************************************************************************/
 
 static int format_one_partition(FAR const char *dev_path, FAR const char *mount_path)
@@ -503,6 +585,13 @@ static int format_one_partition(FAR const char *dev_path, FAR const char *mount_
   int ret = mount(dev_path, mount_path, "littlefs", 0, "forceformat");
   if (ret < 0)
     {
+      if (errno == EBUSY)
+        {
+          printf("[LITTLEFS] Partition %s is active (storage daemon running).\n", mount_path);
+          printf("[LITTLEFS] Erasing all files on %s instead...\n", mount_path);
+          return clean_one_partition(dev_path, mount_path);
+        }
+
       printf("[LITTLEFS] ERROR: Failed to format %s (ret=%d, errno=%d)\n", dev_path, ret, errno);
       return ret;
     }
@@ -513,6 +602,10 @@ static int format_one_partition(FAR const char *dev_path, FAR const char *mount_
 
 /****************************************************************************
  * Name: clean_one_partition
+ *
+ * Description:
+ *   Mount one partition (if not already mounted) and delete every file
+ *   in its root directory, without reformatting the filesystem itself.
  ****************************************************************************/
 
 static int clean_one_partition(FAR const char *dev_path, FAR const char *mount_path)
@@ -549,9 +642,16 @@ static int clean_one_partition(FAR const char *dev_path, FAR const char *mount_p
 
   return OK;
 }
+
 /****************************************************************************
- * Write file to LittleFS
+ * Name: write_file
+ *
+ * Description:
+ *   Write `len` bytes from `data` to `filepath`, truncating/creating as
+ *   needed, and fsync() before closing so the data is flushed from the
+ *   RAM cache to the physical SPI NOR flash.
  ****************************************************************************/
+
 static int write_file(FAR const char *filepath, FAR const void *data, size_t len)
 {
   int fd;
@@ -566,7 +666,6 @@ static int write_file(FAR const char *filepath, FAR const void *data, size_t len
       return -errno;
     }
 
-  /* Write the data */
   nwritten = write(fd, data, len);
   if (nwritten != len)
     {
@@ -575,16 +674,23 @@ static int write_file(FAR const char *filepath, FAR const void *data, size_t len
       return -EIO;
     }
 
-  /* Flush RAM cache to physical SPI NOR Flash */
   fsync(fd);
   close(fd);
 
   printf("RESULT: [PASS] Successfully wrote %zd bytes to %s!\n", nwritten, filepath);
   return OK;
 }
+
 /****************************************************************************
- * Read file from LittleFS
+ * Name: read_file
+ *
+ * Description:
+ *   Read up to `max_len` bytes from `filepath` into `buffer`.
+ *
+ * Returned Value:
+ *   Number of bytes read (>= 0) on success, negative errno on failure.
  ****************************************************************************/
+
 static int read_file(FAR const char *filepath, FAR void *buffer, size_t max_len)
 {
   int fd;
@@ -611,38 +717,16 @@ static int read_file(FAR const char *filepath, FAR void *buffer, size_t max_len)
   printf("RESULT: [PASS] Successfully read %zd bytes from %s!\n", nread, filepath);
   return (int)nread;
 }
-/****************************************************************************
- * LittleFS Test Code
- *Ringbuffer send 
- ****************************************************************************/
-#if 0
-static void ring_buffer_test(void)
-{
-  printf("\n--- Ring Buffer Test ---\n");
-
-  /* Initialize ring buffer */
-  ring_buffer_t rb;
-  ring_buffer_init(&rb);
-
-  /* Write data to the ring buffer */
-  const char *test_data = "Hello, Ring Buffer!";
-  size_t data_len = strlen(test_data);
-  size_t bytes_written = ring_buffer_write(&rb, (const uint8_t *)test_data, data_len);
-  printf("Wrote %zu bytes to the ring buffer.\n", bytes_written);
-
-  /* Read data from the ring buffer */
-  uint8_t read_buffer[64];
-  size_t bytes_read = ring_buffer_read(&rb, read_buffer, sizeof(read_buffer));
-  read_buffer[bytes_read] = '\0'; // Null-terminate for printing
-  printf("Read %zu bytes from the ring buffer: \"%s\"\n", bytes_read, read_buffer);
-}
-#endif
-/****************************************************************************
- * Public Functions
- ****************************************************************************/
 
 /****************************************************************************
- * Name: littlefs_main
+ * Name: littlefs_hardware_test
+ *
+ * Description:
+ *   One-shot bench self-test: brings up SPI1, reads the flash JEDEC ID,
+ *   exercises the status/write-enable/write-disable commands, then
+ *   mounts each die, writes a small test file, reads it back, and
+ *   unmounts.  Not part of the normal flight data path; useful when
+ *   bringing up new hardware or verifying a flash chip is alive.
  ****************************************************************************/
 
 static int littlefs_hardware_test(void)
@@ -669,6 +753,7 @@ static int littlefs_hardware_test(void)
 
   printf("RESULT: [PASS] SPI%d is ready for communication.\n", SPI_PORT);
   printf("=========================================\n\n");
+
   ret = read_flash_id(spi);
   if (ret != OK)
     {
@@ -677,7 +762,8 @@ static int littlefs_hardware_test(void)
     }
   printf("RESULT: Flash ID read successfully.\n");
 
-  //First read status register to check if flash is busy or ready
+  /* Check whether the flash is busy or idle before touching it */
+
   printf("First Reading Flash Status Register...\n");
   status_R = read_flash_status(spi);
   if (status_R & 0x01)
@@ -685,10 +771,12 @@ static int littlefs_hardware_test(void)
       printf("RESULT: Flash is busy (Status Register: %02X)\n", status_R);
     }
   else
-    { 
+    {
       printf("RESULT: Flash is ready/idle (Status Register: %02X)\n", status_R);
     }
-  //Enable write operation and check if flash is busy or ready  
+
+  /* Exercise the write-enable latch and confirm it toggles as expected */
+
   printf("Enabling Flash Write Operation...\n");
   write_flash_enable(spi);
   status_W = read_flash_status(spi);
@@ -700,33 +788,39 @@ static int littlefs_hardware_test(void)
     {
       printf("RESULT: Disabled (Status Register: %02X)\n", status_W);
     }
-  //Disable write operation and check if flash is busy or ready
+
   printf("Disabling Flash Write Operation...\n");
   write_flash_disable(spi);
   status_W = read_flash_status(spi);
   if (status_W & 0x02)
-    { 
+    {
       printf("RESULT: Enabled (Status Register: %02X)\n", status_W);
     }
-  else  
+  else
     {
       printf("RESULT: Disabled (Status Register: %02X)\n", status_W);
     }
-  // printf("Starting 64KB Sector Erase Test...\n");
-  // ret = erase_flash_64kb(spi, 0x020000); /* Erase 64KB sector at address 0x000000 */
-  // if (ret != OK)
-  //     {
-  //     printf("RESULT: [FAIL] 64KB Sector Erase failed!\n\n");
-  //     return EXIT_FAILURE;
-  //   }
+
+  /* Sector-erase test is disabled by default; uncomment to exercise it.
+   *
+   *   printf("Starting 64KB Sector Erase Test...\n");
+   *   ret = erase_flash_64kb(spi, 0x020000);
+   *   if (ret != OK)
+   *     {
+   *       printf("RESULT: [FAIL] 64KB Sector Erase failed!\n\n");
+   *       return EXIT_FAILURE;
+   *     }
+   */
+
   printf("Starting write dummy data to LittleFS test...\n");
   printf("Mounting LittleFS...\n");
-    /* ======================================================================= */
+
+  /* ======================================================================= */
   /* PART 1: TEST DIE 0 (Housekeeping - /dev/hk)                             */
   /* ======================================================================= */
+
   printf("\n--- Testing Die 0 (Housekeeping) ---\n");
 
-  /* 1. Mount Die 0 to /mnt/hk */
   ret = mount_drive("/dev/hk", "/mnt/hk");
   if (ret != OK)
     {
@@ -734,22 +828,21 @@ static int littlefs_hardware_test(void)
       return EXIT_FAILURE;
     }
 
-    /* 2. Write a telemetry file to Die 0 */
-  const char *hk_data = "HK_LOG: Batt=4.1V, Temp=22C, SolarCurrent=1.2A, Status=NOMINAL";
-  write_file("/mnt/hk/telemetry.log", hk_data, strlen(hk_data));
-
-  /* 3. Read it back from Die 0 */
-  memset(read_buf, 0, sizeof(read_buf));
-  read_file("/mnt/hk/telemetry.log", read_buf, sizeof(read_buf) - 1);
-  printf("Die 0 Data Read: \"%s\"\n\n", read_buf);
-
-  /* 4. Unmount Die 0 */
-  unmount_drive("/mnt/hk");
-
+  /* Die 0 write/read-back exercise is currently disabled; uncomment to
+   * write and verify a sample telemetry log line, then unmount:
+   *
+   *   const char *hk_data = "HK_LOG: Batt=4.1V, Temp=22C, SolarCurrent=1.2A, Status=NOMINAL";
+   *   write_file("/mnt/hk/telemetry.log", hk_data, strlen(hk_data));
+   *   memset(read_buf, 0, sizeof(read_buf));
+   *   read_file("/mnt/hk/telemetry.log", read_buf, sizeof(read_buf) - 1);
+   *   printf("Die 0 Data Read: \"%s\"\n\n", read_buf);
+   *   unmount_drive("/mnt/hk");
+   */
 
   /* ======================================================================= */
   /* PART 2: TEST DIE 1 (Camera - /dev/camera)                               */
   /* ======================================================================= */
+
   printf("\n--- Testing Die 1 (Camera Images) ---\n");
 
   /* 1. Mount Die 1 to /mnt/camera */
@@ -760,10 +853,9 @@ static int littlefs_hardware_test(void)
       return EXIT_FAILURE;
     }
 
-  /* 2. Write an image dummy file to Die 1 */
+  /* 2. Write a dummy image file to Die 1 */
   const char *cam_data = "CAMERA_RAW_IMAGE: Width=640, Height=480, Format=RGB565, Frame=1";
   write_file("/mnt/camera/frame001.raw", cam_data, strlen(cam_data));
-
 
   /* 3. Read it back from Die 1 */
   memset(read_buf, 0, sizeof(read_buf));
@@ -773,7 +865,6 @@ static int littlefs_hardware_test(void)
   /* 4. Unmount Die 1 */
   unmount_drive("/mnt/camera");
 
-
   return EXIT_SUCCESS;
 }
 
@@ -781,8 +872,19 @@ static int littlefs_hardware_test(void)
  * Name: littlefs_telemetry_daemon
  *
  * Description:
- *   Listens for telemetry notifications from OBC_main, pops 128-byte
- *   packets from the shared ring buffer, and writes them to /mnt/hk.
+ *   Storage consumer for OBC_main's telemetry producer.  Mounts both
+ *   housekeeping partitions, then loops forever:
+ *
+ *     1. Sleep on g_telemetry_sem (0% CPU while idle; posted once per
+ *        packet by send_telemetry_to_ringbuffer() in OBC_main).
+ *     2. Drain every pending packet from the shared ring buffer.
+ *     3. Route each packet by its footer value to the matching file
+ *        (ADC1 -> /mnt/hk1/telemetry.bin, ADC2+IMU -> /mnt/hk2/telemetry.bin),
+ *        append it, fsync, then read the same bytes back from flash and
+ *        compare against what was written as an integrity check.
+ *     4. On a write() failure that looks like a stale/old flash format
+ *        (EFAULT), automatically force-reformat the partition and retry
+ *        the append once.
  ****************************************************************************/
 
 static int littlefs_telemetry_daemon(void)
@@ -801,7 +903,7 @@ static int littlefs_telemetry_daemon(void)
   printf("\n=======================================================\n");
   printf("  [LITTLEFS DAEMON] Telemetry Storage Consumer Active  \n");
   printf("  Mount 1: /dev/hk1 (32 MB) -> /mnt/hk1 (ADC1, Footer 0xAA55, 34B)\n");
-  printf("  Mount 2: /dev/hk2 (32 MB) -> /mnt/hk2 (ADC2, Footer 0xBB66, 26B)\n");
+  printf("  Mount 2: /dev/hk2 (32 MB) -> /mnt/hk2 (ADC2, Footer 0xBB66, 38B)\n");
   printf("=======================================================\n");
 
   /* 1. Mount Partition 1: /dev/hk1 (32 MB) to /mnt/hk1 */
@@ -828,7 +930,7 @@ static int littlefs_telemetry_daemon(void)
       /* 3. Sleep until notified by OBC_main (0% CPU while waiting) */
       sem_wait(&g_telemetry_sem);
 
-      /* 4. Pop all pending packets from the Ring Buffer */
+      /* 4. Pop all pending packets from the ring buffer */
       while (telemetry_rb_read(&env) == 0)
         {
           packet_num++;
@@ -924,7 +1026,7 @@ static int littlefs_telemetry_daemon(void)
             }
 
           /* ================================================================= */
-          /* ROUTE 2: Footer 0xBB66 -> /mnt/hk2/telemetry.bin (ADC 2: 26 Bytes) */
+          /* ROUTE 2: Footer 0xBB66 -> /mnt/hk2/telemetry.bin (ADC 2: 38 Bytes) */
           /* ================================================================= */
 
           else if (env.footer == TELEM_FOOTER_ADC2)
@@ -1032,6 +1134,10 @@ static int littlefs_telemetry_daemon(void)
 
 /****************************************************************************
  * Name: littlefs_read_hk1
+ *
+ * Description:
+ *   Mount /dev/hk1 if needed and print every stored ADC1 telemetry
+ *   record in /mnt/hk1/telemetry.bin.
  ****************************************************************************/
 
 static int littlefs_read_hk1(void)
@@ -1086,6 +1192,10 @@ static int littlefs_read_hk1(void)
 
 /****************************************************************************
  * Name: littlefs_read_hk2
+ *
+ * Description:
+ *   Mount /dev/hk2 if needed and print every stored ADC2+IMU telemetry
+ *   record in /mnt/hk2/telemetry.bin.
  ****************************************************************************/
 
 static int littlefs_read_hk2(void)
@@ -1141,6 +1251,147 @@ static int littlefs_read_hk2(void)
   printf("\n[TOTAL] Read %lu HK2 records from /mnt/hk2/telemetry.bin\n", (unsigned long)count);
   return 0;
 }
+/*sends the HK1, HK2 and IMU data brust if command received*/
+static void __attribute__((unused)) send_brust_HK(uint32_t start_address, uint16_t packet_count)
+{
+  (void)start_address;
+  (void)packet_count;
+}
+
+/****************************************************************************
+ * Name: print_partition_sizes
+ *
+ * Description:
+ *   Display MT25Q NOR flash partition table, capacity, and current file sizes.
+ ****************************************************************************/
+
+static int print_partition_sizes(void)
+{
+  struct stat st;
+  printf("\n=================================================================\n");
+  printf("  MT25Q SPI NOR FLASH PARTITION TABLE & CURRENT SIZES\n");
+  printf("  Total Flash Capacity: 1 Gbit / 128 MB (Die 0: 64MB, Die 1: 64MB)\n");
+  printf("=================================================================\n");
+
+  /* Auto-mount partitions to inspect sizes */
+  mount_drive("/dev/hk1", "/mnt/hk1");
+  mount_drive("/dev/hk2", "/mnt/hk2");
+  mount_drive("/dev/camera", "/mnt/camera");
+
+  printf("  Partition 1: /dev/hk1    (32 MB - Die 0) -> Mount: /mnt/hk1\n");
+  if (stat("/mnt/hk1/telemetry.bin", &st) == 0)
+    {
+      printf("    File: /mnt/hk1/telemetry.bin | Size: %ld Bytes (%ld Packets, 34B/pkt)\n",
+             (long)st.st_size, (long)(st.st_size / sizeof(struct adc1_packet_s)));
+    }
+  else
+    {
+      printf("    File: /mnt/hk1/telemetry.bin | Size: 0 Bytes (empty / not recorded yet)\n");
+    }
+
+  printf("  Partition 2: /dev/hk2    (32 MB - Die 0) -> Mount: /mnt/hk2\n");
+  if (stat("/mnt/hk2/telemetry.bin", &st) == 0)
+    {
+      printf("    File: /mnt/hk2/telemetry.bin | Size: %ld Bytes (%ld Packets, 38B/pkt)\n",
+             (long)st.st_size, (long)(st.st_size / sizeof(struct adc2_packet_s)));
+    }
+  else
+    {
+      printf("    File: /mnt/hk2/telemetry.bin | Size: 0 Bytes (empty / not recorded yet)\n");
+    }
+
+  printf("  Partition 3: /dev/camera (64 MB - Die 1) -> Mount: /mnt/camera\n");
+  if (stat("/mnt/camera/capture_01.raw", &st) == 0)
+    {
+      printf("    File: /mnt/camera/capture_01.raw | Size: %ld Bytes\n", (long)st.st_size);
+    }
+  else
+    {
+      printf("    File: /mnt/camera/capture_01.raw | Size: 0 Bytes (empty / not captured yet)\n");
+    }
+  printf("=================================================================\n\n");
+  return 0;
+}
+
+/****************************************************************************
+ * Name: littlefs_erase_cmd
+ *
+ * Description:
+ *   Erase partition filesystem or trigger low-level flash sector/block erase.
+ ****************************************************************************/
+
+static int littlefs_erase_cmd(int argc, FAR char *argv[])
+{
+  if (argc < 3)
+    {
+      printf("[LITTLEFS] No partition specified. Erasing/cleaning all partitions (HK1, HK2, Camera)...\n");
+      format_one_partition("/dev/hk1", "/mnt/hk1");
+      format_one_partition("/dev/hk2", "/mnt/hk2");
+      format_one_partition("/dev/camera", "/mnt/camera");
+      printf("\n[TIP] You can also target specific partitions:\n");
+      printf("  littlefs erase hk1     - Erase/format HK1 partition\n");
+      printf("  littlefs erase hk2     - Erase/format HK2 partition\n");
+      printf("  littlefs erase camera  - Erase/format Camera partition\n");
+      printf("  littlefs erase all     - Full 128MB chip erase\n\n");
+      return 0;
+    }
+
+  if (strcmp(argv[2], "hk1") == 0)
+    {
+      return format_one_partition("/dev/hk1", "/mnt/hk1");
+    }
+  else if (strcmp(argv[2], "hk2") == 0)
+    {
+      return format_one_partition("/dev/hk2", "/mnt/hk2");
+    }
+  else if (strcmp(argv[2], "camera") == 0 || strcmp(argv[2], "cam") == 0)
+    {
+      return format_one_partition("/dev/camera", "/mnt/camera");
+    }
+  else
+    {
+      FAR struct spi_dev_s *spi = init_spi(SPI_PORT);
+      if (spi == NULL)
+        {
+          printf("ERROR: Failed to initialize SPI%d for flash erase!\n", SPI_PORT);
+          return -EIO;
+        }
+
+      if (strcmp(argv[2], "all") == 0 || strcmp(argv[2], "chip") == 0)
+        {
+          return erase_flash_all(spi);
+        }
+      else if (strcmp(argv[2], "die") == 0)
+        {
+          uint32_t addr = 0;
+          if (argc > 3) addr = (uint32_t)strtoul(argv[3], NULL, 0);
+          return erase_flash_die(spi, addr);
+        }
+      else if (strcmp(argv[2], "64kb") == 0)
+        {
+          uint32_t addr = 0;
+          if (argc > 3) addr = (uint32_t)strtoul(argv[3], NULL, 0);
+          return erase_flash_64kb(spi, addr);
+        }
+      else if (strcmp(argv[2], "32kb") == 0)
+        {
+          uint32_t addr = 0;
+          if (argc > 3) addr = (uint32_t)strtoul(argv[3], NULL, 0);
+          return erase_flash_32kb(spi, addr);
+        }
+      else if (strcmp(argv[2], "4kb") == 0)
+        {
+          uint32_t addr = 0;
+          if (argc > 3) addr = (uint32_t)strtoul(argv[3], NULL, 0);
+          return erase_flash_4kb(spi, addr);
+        }
+      else
+        {
+          printf("Unknown erase target: %s\n", argv[2]);
+          return -EINVAL;
+        }
+    }
+}
 
 /****************************************************************************
  * Public Functions
@@ -1148,6 +1399,17 @@ static int littlefs_read_hk2(void)
 
 /****************************************************************************
  * Name: littlefs_main
+ *,
+ * Description:
+ *   NSH entry point.
+ *
+ *     littlefs                         -> run telemetry storage daemon
+ *     littlefs read   [hk1|hk2]        -> dump stored telemetry records
+ *     littlefs clean  [hk1|hk2|camera] -> delete files, keep format
+ *     littlefs format [hk1|hk2|camera] -> force-reformat LittleFS partition
+ *     littlefs erase  [hk1|hk2|camera|chip|die|4kb|32kb|64kb] -> flash erase
+ *     littlefs size   [partition/info] -> show partition table & file sizes
+ *     littlefs test                    -> run low-level SPI NOR self-test
  ****************************************************************************/
 
 int littlefs_main(int argc, FAR char *argv[])
@@ -1217,9 +1479,31 @@ int littlefs_main(int argc, FAR char *argv[])
               return 0;
             }
         }
+      else if (strcmp(argv[1], "size") == 0 || strcmp(argv[1], "partition") == 0 ||
+               strcmp(argv[1], "part") == 0 || strcmp(argv[1], "info") == 0)
+        {
+          return print_partition_sizes();
+        }
+      else if (strcmp(argv[1], "erase") == 0)
+        {
+          return littlefs_erase_cmd(argc, argv);
+        }
       else if (strcmp(argv[1], "test") == 0)
         {
           return littlefs_hardware_test();
+        }
+      else if (strcmp(argv[1], "help") == 0 || strcmp(argv[1], "-h") == 0)
+        {
+          printf("\nUsage: littlefs [command] [target]\n");
+          printf("Commands:\n");
+          printf("  read   [hk1 | hk2]            - Dump stored telemetry records\n");
+          printf("  clean  [hk1 | hk2 | camera]   - Delete files, keep format\n");
+          printf("  format [hk1 | hk2 | camera]   - Force-reformat LittleFS partition\n");
+          printf("  erase  [hk1 | hk2 | camera | 4kb | 32kb | 64kb | die | all] - Flash erase\n");
+          printf("  size   [or partition/info]    - Display partition table & file sizes\n");
+          printf("  test                          - Run low-level SPI NOR self-test\n");
+          printf("  (no args)                     - Run telemetry storage daemon\n\n");
+          return 0;
         }
     }
 

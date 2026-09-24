@@ -22,12 +22,12 @@ include $(APPDIR)/Make.defs
 
 # littlefs test
 
-PROGNAME = littlefs
+PROGNAME = littlefs read erase
 PRIORITY = SCHED_PRIORITY_DEFAULT
 STACKSIZE = $(CONFIG_DEFAULT_TASK_STACKSIZE)
 MODULE = $(CONFIG_EXAMPLES_LITTLEFS)
 
-MAINSRC = littlefs_main_mount.c
+MAINSRC = littlefs_main_mount.c read_main.c erase_main.c
 CSRCS += $(APPDIR)/examples/OBC_main/ring_buffer.c
 
 CFLAGS += -I$(APPDIR)/examples/OBC_main

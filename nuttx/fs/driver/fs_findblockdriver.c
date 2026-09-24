@@ -100,13 +100,11 @@ int find_blockdriver(FAR const char *pathname, int mountflags,
 #ifdef CONFIG_MTD
       if (INODE_IS_MTD(inode))
         {
-          printf("find_blockdriver Second: %s is a MTD\n", pathname);
           finfo("%s is a MTD\n", pathname);
         }
       else
 #endif
         {
-          printf("find_blockdriver Third: %s is not a block driver\n", pathname);
           ferr("ERROR: %s is not a block driver\n", pathname);
         }
 

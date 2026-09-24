@@ -287,7 +287,6 @@ int nx_mount(FAR const char *source, FAR const char *target,
              FAR const char *filesystemtype, unsigned long mountflags,
              FAR const void *data)
 {
-  printf("starting nx mount\n");
 #if defined(BDFS_SUPPORT) || defined(MDFS_SUPPORT) || defined(NODFS_SUPPORT)
   FAR struct inode *drvr_inode = NULL;
   FAR struct inode *mountpt_inode = NULL;
@@ -301,7 +300,7 @@ int nx_mount(FAR const char *source, FAR const char *target,
   /* Verify required pointer arguments */
 
   DEBUGASSERT(target && filesystemtype);
-  printf("before find block driver\n");
+
   /* Find the specified filesystem. Try the block driver filesystems first */
 
   if (source != NULL && source[0] != '\0' &&

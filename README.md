@@ -283,26 +283,69 @@ make APP=gs -j4
 # Produces: CPU2/gs_m0plus.bin (40.7 KB)
 ```
 
-### Flashing via Make Targets (Recommended)
+### Flashing via Make Targets (Independent Core Flashing)
 
-From the `CPU2` directory (or workspace root):
+Both cores can be flashed **completely independently** in any order. Flashing CPU1 erases only sectors 0–99 (leaving CPU2 at `0x08032000` intact). Flashing CPU2 erases only sectors 100–127 (leaving CPU1 at `0x08000000` intact).
+
+From the workspace root (`/home/prem/Desktop/nuttxspace`):
 
 ```bash
-# Flash Ground Station Firmware only (flashes to 0x08032000 with hardware reset):
-make flash_GS
+# 1. Flash CPU1 (Cortex-M4 / NuttX) ONLY to 0x08000000 (CPU2 is preserved):
+make flash_cpu1
+# (or 'make flash')
 
-# Flash Satellite Flight Firmware only (flashes to 0x08032000 with hardware reset):
+# 2. Flash CPU2 (Cortex-M0+ / Satellite Radio) ONLY to 0x08032000 (CPU1 is preserved):
 make flash_sat
+
+# 3. Flash CPU2 (Cortex-M0+ / Ground Station) ONLY to 0x08032000 (CPU1 is preserved):
+make flash_gs
+
+# 4. (Optional) Flash both cores sequentially (CPU1 then CPU2, no mass erase):
+make flash_all_sat
+make flash_all_gs
+```
+
+From inside the `nuttx/` directory:
+```bash
+# Flash CPU1 only:
+make flash
+# (or 'make flash_cpu1')
+
+# Flash CPU2 from nuttx directory:
+make flash_sat
+make flash_gs
 ```
 
 ### Manual Flashing via `STM32_Programmer_CLI`
 
+> [!WARNING]
+> **DO NOT use Mass Erase (`-e all`)!** Mass erase will wipe both cores simultaneously. The `-w` parameter performs sector-level erasure only for the target core's address space.
+
+```bash
+# Flash CPU1 (M4 NuttX OBC) to 0x08000000 (Sectors 0 - 99):
+STM32_Programmer_CLI -c port=SWD -w nuttx/nuttx.bin 0x08000000 -v -hardRst
+
+# Flash CPU2 (M0+ Satellite Radio) to 0x08032000 (Sectors 100 - 127):
+STM32_Programmer_CLI -c port=SWD -w CPU2/ipcc_m0plus.bin 0x08032000 -v -hardRst
+
+# Flash CPU2 (M0+ Ground Station) to 0x08032000 (Sectors 100 - 127):
+STM32_Programmer_CLI -c port=SWD -w CPU2/gs_m0plus.bin 0x08032000 -v -hardRst
+```
+
+### Manual Flashing via `OpenOCD`
+
 ```bash
 # Flash CPU1 (M4 NuttX OBC) to 0x08000000:
-STM32_Programmer_CLI -c port=SWD -w nuttx/nuttx.bin 0x08000000 -v
+openocd -f interface/stlink.cfg -f target/stm32wlx.cfg \
+  -c "init" -c "targets" -c "reset halt" -c "flash probe 0" \
+  -c "program nuttx/nuttx.bin 0x08000000 verify" \
+  -c "reset run" -c "exit"
 
-# Flash CPU2 (M0+ Satellite Radio) to 0x08032000 with Hardware Reset:
-STM32_Programmer_CLI -c port=SWD -w nuttx/boards/arm/stm32wl5/nucleo-wl55jc/CPU2/ipcc_m0plus.bin 0x08032000 -v -hardRst
+# Flash CPU2 (M0+ Satellite Radio) to 0x08032000:
+openocd -f interface/stlink.cfg -f target/stm32wlx.cfg \
+  -c "init" -c "targets" -c "reset halt" -c "flash probe 0" \
+  -c "program CPU2/ipcc_m0plus.bin 0x08032000 verify" \
+  -c "reset run" -c "exit"
 ```
 
 ---

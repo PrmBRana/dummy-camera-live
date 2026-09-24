@@ -116,6 +116,7 @@ void weak_function stm32wl5_spidev_initialize(void)
   /* SPI2S2 chip select for ADC2 */
   stm32wl5_configgpio(GPIO_SPI2S2_NSS2);
   stm32wl5_gpiowrite(GPIO_SPI2S2_NSS2, true);
+#endif
 
     /* SPI2S2 chip select for MAG */
   stm32wl5_configgpio(GPIO_SPI2S2_NSS3);
@@ -124,7 +125,7 @@ void weak_function stm32wl5_spidev_initialize(void)
     /* SPI2S2 chip select for MPU */
   stm32wl5_configgpio(GPIO_SPI2S2_NSS4);
   stm32wl5_gpiowrite(GPIO_SPI2S2_NSS4, true);
-#endif
+
 #endif
 }
 
@@ -233,23 +234,28 @@ void stm32wl5_spi2s2select(struct spi_dev_s *dev, uint32_t devid,
     {
       /* ADC1 Chip Select */
       stm32wl5_gpiowrite(GPIO_SPI2S2_NSS1, !selected);
+      return;
     }
   else if (devid == SPIDEV_USER(1))
     {
       /* ADC2 Chip Select */
       stm32wl5_gpiowrite(GPIO_SPI2S2_NSS2, !selected);
+      return;
     }
-    else if (devid == SPIDEV_USER(2))
+#endif
+
+  if (devid == SPIDEV_USER(2))
     {
       /* MAG Chip Select */
       stm32wl5_gpiowrite(GPIO_SPI2S2_NSS3, !selected);
+      return;
     }
-    else if (devid == SPIDEV_USER(3))
+  else if (devid == SPIDEV_USER(3))
     {
-      /* MPU Chip Select */
+      /* MPU / Gyro Chip Select */
       stm32wl5_gpiowrite(GPIO_SPI2S2_NSS4, !selected);
+      return;
     }
-#endif
 }
 
 uint8_t stm32wl5_spi2s2status(struct spi_dev_s *dev, uint32_t devid)

@@ -99,7 +99,6 @@ static int stm32wl5_mt25q_initialize(void)
   struct spi_dev_s *spi;
   struct mtd_dev_s *mtd;
   uint8_t id[3] = {0};
-  int ret;
 
   syslog(LOG_INFO, "Initializing external MT25Q NOR Flash...\n");
 

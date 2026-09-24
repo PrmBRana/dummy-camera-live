@@ -71,13 +71,6 @@ int nsh_consolemain(int argc, FAR char *argv[])
       return -ENOMEM;
     }
 
-#if defined(CONFIG_EXAMPLES_CAMERA_LAUNCHER)
-  /* Automatically spawn OBC Master Launcher */
-  {
-    extern int launcher_main(int argc, char *argv[]);
-    task_create("launcher", 100, 2048, launcher_main, NULL);
-  }
-#endif
 
   /* Execute the session */
 
