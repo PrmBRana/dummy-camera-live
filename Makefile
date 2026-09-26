@@ -1,5 +1,10 @@
 CPU2_DIR   ?= $(shell if [ -d JC2/cpu2 ]; then echo JC2/cpu2; elif [ -d CPU2 ]; then echo CPU2; else echo nuttx/boards/arm/stm32wl5/nucleo-wl55jc/CPU2; fi)
-STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || ls $(HOME)/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null || ls /home/*/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null | head -n 1 || echo STM32_Programmer_CLI)
+STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || \
+	ls $(HOME)/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null || \
+	ls /home/*/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null | head -n 1 || \
+	ls /opt/st/stm32cubeide_*/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.linux64_*/tools/bin/STM32_Programmer_CLI 2>/dev/null | head -n 1 || \
+	ls /opt/st/stm32cubeprogrammer_*/bin/STM32_Programmer_CLI 2>/dev/null | head -n 1 || \
+	echo STM32_Programmer_CLI)
 
 all:
 	$(MAKE) -C nuttx
@@ -20,32 +25,12 @@ flash flash_cpu1 flash_m4 flash_M4 flash_CPU1:
 	  $(STM32_PROG) -c port=SWD mode=HOTPLUG -w nuttx/nuttx.bin 0x08000000 -v -hardRst 2>/dev/null || \
 	  $(STM32_PROG) -c port=SWD -w nuttx/nuttx.bin 0x08000000 -v -hardRst || \
 	  (echo "STM32_Programmer_CLI failed. Trying OpenOCD fallback..." && \
-	  openocd \
-	    -f interface/stlink.cfg \
-	    -c "transport select hla_swd" \
-	    -c "reset_config none" \
-	    -f target/stm32wlx.cfg \
-	    -c "init" \
-	    -c "targets" \
-	    -c "reset halt" \
-	    -c "flash probe 0" \
-	    -c "program nuttx/nuttx.bin 0x08000000 verify" \
-	    -c "reset run" \
-	    -c "exit"); \
+	  openocd -f interface/stlink.cfg -f target/stm32wlx.cfg -c "reset_config none" -c "program nuttx/nuttx.bin 0x08000000 verify reset exit" 2>/dev/null || \
+	  openocd -f interface/stlink-dap.cfg -f target/stm32wlx.cfg -c "reset_config none" -c "program nuttx/nuttx.bin 0x08000000 verify reset exit"); \
 	else \
 	  echo "Flashing CPU1 (NuttX) to 0x08000000 using OpenOCD (CPU2 preserved)..."; \
-	  openocd \
-	    -f interface/stlink.cfg \
-	    -c "transport select hla_swd" \
-	    -c "reset_config none" \
-	    -f target/stm32wlx.cfg \
-	    -c "init" \
-	    -c "targets" \
-	    -c "reset halt" \
-	    -c "flash probe 0" \
-	    -c "program nuttx/nuttx.bin 0x08000000 verify" \
-	    -c "reset run" \
-	    -c "exit"; \
+	  openocd -f interface/stlink.cfg -f target/stm32wlx.cfg -c "reset_config none" -c "program nuttx/nuttx.bin 0x08000000 verify reset exit" 2>/dev/null || \
+	  openocd -f interface/stlink-dap.cfg -f target/stm32wlx.cfg -c "reset_config none" -c "program nuttx/nuttx.bin 0x08000000 verify reset exit"; \
 	fi
 
 # ==========================================================================
