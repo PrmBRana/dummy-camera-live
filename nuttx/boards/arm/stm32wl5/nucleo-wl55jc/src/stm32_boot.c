@@ -231,6 +231,98 @@ void stm32wl5_board_initialize(void)
  *
  ****************************************************************************/
 
+#if defined(CONFIG_ARCH_BOARD_ENABLE_CPU2)
+/****************************************************************************
+ * Name: stm32wl5_ensure_cpu2_boot_vector
+ *
+ * Description:
+ *   Ensures that the silicon Option Bytes (FLASH_SRRVR) point CPU2
+ *   (Cortex-M0+) to 0x08032000 in Flash. If unconfigured or at factory
+ *   default, unlocks Option Bytes, writes the correct boot vector, and
+ *   triggers an Option Byte reload (system reset).
+ *
+ ****************************************************************************/
+
+static void stm32wl5_ensure_cpu2_boot_vector(void)
+{
+  /* SBRV for 0x08032000:
+   * (0x08032000 - 0x08000000) >> 2 = 0x32000 >> 2 = 0xC800.
+   * Bit 31 (C2OPT) = 1 (Boot from Flash).
+   */
+
+  const uint32_t target_sbrv  = (0x00032000UL >> 2); /* 0xC800 */
+  const uint32_t target_srrvr = (1UL << 31) | target_sbrv;
+  uint32_t srrvr;
+
+  srrvr = getreg32(STM32WL5_FLASH_SRRVR);
+
+  /* Check if SBRV and C2OPT are already properly set */
+
+  if ((srrvr & 0x8000FFFFUL) == target_srrvr)
+    {
+      return; /* Hardware already points CPU2 to 0x08032000 */
+    }
+
+  printf("\n[SYSTEM] [AUTO-CONFIG] CPU2 boot vector mismatch! (Current SRRVR: 0x%08lx, Target: 0x%08lx)\n",
+         (unsigned long)srrvr, (unsigned long)target_srrvr);
+  printf("[SYSTEM] [AUTO-CONFIG] Automatically configuring silicon Option Bytes to 0x08032000...\n");
+  fflush(stdout);
+
+  /* 1. Wait for any active flash operation to finish */
+
+  while (getreg32(STM32WL5_FLASH_SR) & (FLASH_SR_BSY | FLASH_SR_CFGBSY))
+    {
+      up_udelay(10);
+    }
+
+  /* 2. Unlock Flash Control Register if locked */
+
+  if (getreg32(STM32WL5_FLASH_CR) & FLASH_CR_LOCK)
+    {
+      putreg32(0x45670123UL, STM32WL5_FLASH_KEYR);
+      putreg32(0xCDEF89ABUL, STM32WL5_FLASH_KEYR);
+    }
+
+  /* 3. Unlock Option Bytes if locked */
+
+  if (getreg32(STM32WL5_FLASH_CR) & FLASH_CR_OPTLOCK)
+    {
+      putreg32(0x08192A3BUL, STM32WL5_FLASH_OPTKEYR);
+      putreg32(0x4C5D6E7FUL, STM32WL5_FLASH_OPTKEYR);
+    }
+
+  /* 4. Write new CPU2 boot vector into FLASH_SRRVR */
+
+  modifyreg32(STM32WL5_FLASH_SRRVR, 0x8000FFFFUL, target_srrvr);
+
+  /* 5. Start Option Byte modification */
+
+  modifyreg32(STM32WL5_FLASH_CR, 0, FLASH_CR_OPTSTRT);
+
+  /* 6. Wait until modification finishes */
+
+  while (getreg32(STM32WL5_FLASH_SR) & (FLASH_SR_BSY | FLASH_SR_CFGBSY))
+    {
+      up_udelay(10);
+    }
+
+  printf("[SYSTEM] [AUTO-CONFIG] Option Bytes programmed! Reloading OBL (resetting system)...\n");
+  fflush(stdout);
+  up_mdelay(100);
+
+  /* 7. Launch Option Byte reload (forces hardware reset to apply new boot address) */
+
+  modifyreg32(STM32WL5_FLASH_CR, 0, FLASH_CR_OBL_LAUNCH);
+
+  /* Wait for reset to occur */
+
+  for (;;)
+    {
+      __asm__ volatile ("nop");
+    }
+}
+#endif
+
 #ifdef CONFIG_BOARD_LATE_INITIALIZE
 void board_late_initialize(void)
 {
@@ -317,11 +409,15 @@ void board_late_initialize(void)
 #endif
 
 #if defined(CONFIG_ARCH_BOARD_ENABLE_CPU2)
+  /* Ensure Option Bytes point CPU2 to 0x08032000 (Self-configuring) */
+
+  stm32wl5_ensure_cpu2_boot_vector();
+
   /* Start second CPU (Cortex-M0+) */
 
-  /* Ensure CPU2 peripheral clocks for SRAM2, IPCC, and GPIOA/B/C are pre-enabled */
-  modifyreg32(0x58000150, 0, (1 << 0) | (1 << 25)); /* C2AHB3ENR: IPCCEN | SRAM2EN */
-  modifyreg32(0x5800014c, 0, (1 << 0) | (1 << 1) | (1 << 2)); /* C2AHB2ENR: GPIOA/B/C */
+  /* Ensure CPU2 peripheral clocks for Flash, IPCC, HSEM, and GPIOA/B/C are pre-enabled */
+  modifyreg32(0x58000150, 0, (1 << 20) | (1 << 25) | (1 << 19)); /* C2AHB3ENR: IPCCEN | FLASHEN | HSEMEN */
+  modifyreg32(0x5800014c, 0, (1 << 0) | (1 << 1) | (1 << 2));   /* C2AHB2ENR: GPIOA/B/C */
 
   printf("[SYSTEM] Booting Cortex-M0+ (CPU2) at 0x08032000 (M4: 200KB, M0+: 56KB)...\n");
   fflush(stdout);

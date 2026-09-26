@@ -61,7 +61,7 @@ define POSTBUILD
 	}'
 endef
 
-STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || ls /home/prem/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null || echo STM32_Programmer_CLI)
+STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || ls $(HOME)/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null || ls /home/*/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null | head -n 1 || echo STM32_Programmer_CLI)
 
 # FLASH -- Program CPU1 (NuttX) firmware ONLY to 0x08000000 (Sectors 0-99)
 # CPU2 / Cortex-M0+ at 0x08032000 (Sectors 100-127) is strictly preserved!

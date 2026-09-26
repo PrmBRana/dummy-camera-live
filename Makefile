@@ -1,5 +1,5 @@
 CPU2_DIR   ?= $(shell if [ -d JC2/cpu2 ]; then echo JC2/cpu2; elif [ -d CPU2 ]; then echo CPU2; else echo nuttx/boards/arm/stm32wl5/nucleo-wl55jc/CPU2; fi)
-STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || ls /home/prem/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null || echo STM32_Programmer_CLI)
+STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || ls $(HOME)/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null || ls /home/*/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null | head -n 1 || echo STM32_Programmer_CLI)
 
 all:
 	$(MAKE) -C nuttx
@@ -9,7 +9,7 @@ all:
 # This writes ONLY to sectors 0-99 (200 KB max).
 # CPU2 at 0x08032000 (sectors 100-127) is strictly preserved!
 # ==========================================================================
-flash flash_cpu1 flash_m4:
+flash flash_cpu1 flash_m4 flash_M4 flash_CPU1:
 	@if [ ! -f nuttx/nuttx.bin ]; then \
 	  echo "nuttx/nuttx.bin not found. Building NuttX..."; \
 	  $(MAKE) -C nuttx; \
@@ -72,5 +72,5 @@ clean_m0 clean_cpu2:
 clean_all: clean_m0
 	$(MAKE) -C nuttx clean
 
-.PHONY: all flash flash_cpu1 flash_m4 flash_gs flash_GS flash_cpu2_gs flash_sat flash_SAT flash_cpu2_sat flash_m0 flash_cpu2 build_m0 build_cpu2 flash_all_sat flash_all_gs clean_m0 clean_cpu2 clean_all
+.PHONY: all flash flash_cpu1 flash_m4 flash_M4 flash_CPU1 flash_gs flash_GS flash_cpu2_gs flash_sat flash_SAT flash_cpu2_sat flash_m0 flash_cpu2 build_m0 build_cpu2 flash_all_sat flash_all_gs clean_m0 clean_cpu2 clean_all
 

@@ -43,7 +43,7 @@ endif
 CPU2_DIR ?= $(shell if [ -d ../JC2/cpu2 ]; then echo ../JC2/cpu2; elif [ -d ../CPU2 ]; then echo ../CPU2; elif [ -d boards/arm/stm32wl5/nucleo-wl55jc/CPU2 ]; then echo boards/arm/stm32wl5/nucleo-wl55jc/CPU2; else echo CPU2; fi)
 
 # Flash Cortex-M4 (NuttX) only (0x08000000)
-flash_cpu1 flash_m4: flash
+flash_cpu1 flash_m4 flash_M4 flash_CPU1: flash
 
 # Flash Cortex-M0+ from JC2/cpu2 (0x08032000)
 flash_sat flash_SAT flash_cpu2_sat flash_m0 flash_cpu2:
@@ -62,7 +62,7 @@ clean_m0 clean_cpu2:
 flash_all_sat: flash_cpu1 flash_sat
 flash_all_gs:  flash_cpu1 flash_gs
 
-.PHONY: flash_cpu1 flash_m4 flash_gs flash_GS flash_cpu2_gs flash_sat flash_SAT flash_cpu2_sat flash_m0 flash_cpu2 build_m0 build_cpu2 clean_m0 clean_cpu2 flash_all_sat flash_all_gs
+.PHONY: flash_cpu1 flash_m4 flash_M4 flash_CPU1 flash_gs flash_GS flash_cpu2_gs flash_sat flash_SAT flash_cpu2_sat flash_m0 flash_cpu2 build_m0 build_cpu2 clean_m0 clean_cpu2 flash_all_sat flash_all_gs
 
 endif
 

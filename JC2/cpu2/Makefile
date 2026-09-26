@@ -247,7 +247,7 @@ $(TARGET).bin: $(TARGET).elf
 # PROGRAMMER
 # ==========================================================================
 
-STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || ls /home/prem/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null || echo STM32_Programmer_CLI)
+STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || ls $(HOME)/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null || ls /home/*/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null | head -n 1 || echo STM32_Programmer_CLI)
 
 # ==========================================================================
 # FLASH CPU2 (CORTEX-M0+ ONLY: 0x08032000 - 0x0803FFFF)
@@ -257,6 +257,9 @@ STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || ls /home/prem/ST
 
 flash: $(TARGET).bin
 	@if [ -x "$$(which $(STM32_PROG) 2>/dev/null)" ] || [ -x "$(STM32_PROG)" ]; then \
+	  echo "Ensuring Option Bytes: C2BOOTADD0 / SBRV -> 0x08032000..."; \
+	  $(STM32_PROG) -c port=SWD mode=UR -ob C2BOOTADD0=0x08032000 2>/dev/null || \
+	  $(STM32_PROG) -c port=SWD mode=UR -ob SBRV=0x00032000 2>/dev/null || true; \
 	  echo "Flashing $(TARGET).bin to 0x08032000 using STM32_Programmer_CLI (CPU1 preserved)..."; \
 	  $(STM32_PROG) -c port=SWD mode=UR -w $(TARGET).bin 0x08032000 -v -hardRst 2>/dev/null || \
 	  $(STM32_PROG) -c port=SWD mode=HOTPLUG -w $(TARGET).bin 0x08032000 -v -hardRst 2>/dev/null || \
@@ -330,7 +333,7 @@ size: $(TARGET).elf
 
 clean:
 	rm -f $(TARGET).elf $(TARGET).bin $(TARGET).map satellite.elf satellite.bin satellite.map gs.elf gs.bin gs.map
-	find . -type f \( -name "*.o" -o -name "*.d" \) -delete
+	find . -path "./V1.4" -prune -o -type f \( -name "*.o" -o -name "*.d" \) -exec rm -f {} +
 
 
 .PHONY: all flash sat SAT flash_sat flash_SAT gs GS flash_gs flash_GS size clean
