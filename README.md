@@ -5,28 +5,43 @@
 [![Radio: SX126x Sub-GHz](https://img.shields.io/badge/Radio-SX126x%20Sub--GHz-orange.svg)]()
 [![Modulation: GMSK / AX.25 / CW](https://img.shields.io/badge/Modulation-GMSK%20%2F%20AX.25%20%2F%20CW-purple.svg)]()
 
-## Friends: Ground Station GUI after GitHub clone
+## Run on any laptop (clone once, flash prebuilt bins)
 
-`Ground_Station/gs_communicator.py` **does not receive radio**. It only reads UART from the **Ground Station MCU** at 115200 8N1.
+Do **not** clone `main`. Prebuilt images and the working satellite/GS firmware are on **`working-firmware`**.
 
-A default `git clone` of `main` is the old tree and **does not include** `gs_m0plus.bin`. Satellite CW working does **not** mean the GUI will get packets.
+CW Morse can work from an old satellite M0+ image. **Uplink commands and ADC1/ADC2 do not.** Those need:
+
+| Board | File | Address | UART banner |
+|:---|:---|:---|:---|
+| Satellite M4 | `nuttx/nuttx.bin` | `0x08000000` | `[BOOT] obc_main auto-started ... ADC1+ADC2+IMU` |
+| Satellite M0+ | `Satellite_M0+/Com_sat/satellite.bin` | `0x08032000` | `FW-ID: SAT-G3RUH-UPLINK7` |
+| Ground Station M0+ | `Ground_Station/gs_m0plus.bin` | `0x08032000` | `FW-ID: GS-G3RUH-20261006` |
 
 ```bash
 git clone -b working-firmware https://github.com/PrmBRana/dummy-camera-live.git
 cd dummy-camera-live
+pip3 install -r Ground_Station/requirements.txt
 
-# 1) Flash the GS Nucleo (JC2) — USB cable on the GS ST-LINK, not the satellite
-cd Ground_Station
-pip3 install pyserial pillow
-make flash_GS
-# CuteCom/minicom 115200 on the GS COM must show:
-#   FW-ID: GS-G3RUH-20261006 | RFO_HP +22 dBm
+# 1) Plug ONLY the satellite Nucleo, then:
+python3 tools/flash.py satellite
 
-# 2) Run the GUI and Connect that same GS COM port
-python3 gs_communicator.py
+# 2) Unplug satellite. Plug ONLY the ground-station Nucleo, then:
+python3 tools/flash.py gs
+
+# 3) GUI talks to the GS COM port (not the satellite COM)
+python3 Ground_Station/gs_communicator.py
 ```
 
-Two Nucleo boards = two serial ports. If Python is on the **satellite** COM, the GUI receives nothing. Disconnect, Refresh, pick the GS ST-LINK port.
+Linux with `make` and STM32CubeProgrammer:
+
+```bash
+make flash_all_sat    # M4 + satellite M0+  (ADC1/ADC2 + uplink RX)
+make flash_GS         # ground station only
+```
+
+`make flash_sat` flashes **M0+ radio only**. That is why CW works but ADC1/ADC2 and some commands fail — you still need `make flash_all_sat`.
+
+Satellite UART must say `CW telemetry source: LIVE (M4 ADC1/ADC2/IMU)`, not `DEFAULT`. Send HK/camera **after CW**, during LISTEN on **437.375 MHz**.
 
 Never flash `satellite.bin` onto the GS board.
 
@@ -294,42 +309,40 @@ The same codebase can be compiled into dedicated Ground Station firmware (`gs_m0
 
 ### Building the Binaries
 
+From the repository root (any laptop; not `/home/prem/...`):
+
 ```bash
-# 1. Build CPU1 Cortex-M4 (NuttX OBC)
-cd /home/prem/Desktop/nuttxspace/nuttx
+# 1. Build CPU1 Cortex-M4 (NuttX OBC) — optional; nuttx/nuttx.bin is already in git
+cd nuttx
 make -j4
-# Produces: nuttx/nuttx.bin (117 KB)
+# Produces: nuttx/nuttx.bin
 
 # 2. Build CPU2 Cortex-M0+ Satellite Flight Firmware
-cd /home/prem/Desktop/nuttxspace/nuttx/boards/arm/stm32wl5/nucleo-wl55jc/CPU2
-make APP=satellite -j4
-# Produces: CPU2/ipcc_m0plus.bin (38.5 KB)
+cd ../Satellite_M0+/Com_sat
+make -j4
+# Produces: satellite.bin
 
 # 3. Build CPU2 Cortex-M0+ Ground Station Firmware
-make APP=gs -j4
-# Produces: CPU2/gs_m0plus.bin (40.7 KB)
+cd ../../Ground_Station
+make -j4
+# Produces: gs_m0plus.bin
 ```
 
 ### Flashing via Make Targets (Independent Core Flashing)
 
 Both cores can be flashed **completely independently** in any order. Flashing CPU1 erases only sectors 0–99 (leaving CPU2 at `0x08032000` intact). Flashing CPU2 erases only sectors 100–127 (leaving CPU1 at `0x08000000` intact).
 
-From the workspace root (`/home/prem/Desktop/nuttxspace`):
+From the repository root:
 
 ```bash
-# 1. Flash CPU1 (Cortex-M4 / NuttX) ONLY to 0x08000000 (CPU2 is preserved):
-make flash_cpu1
-# (or 'make flash')
+# Friends / any laptop: flash satellite M4+M0+ so ADC1/ADC2 and uplink work
+make flash_all_sat
 
-# 2. Flash CPU2 (Cortex-M0+ / Satellite Radio) ONLY to 0x08032000 (CPU1 is preserved):
+# M0+ radio only (CW works, ADC1/ADC2 will NOT):
 make flash_sat
 
-# 3. Flash CPU2 (Cortex-M0+ / Ground Station) ONLY to 0x08032000 (CPU1 is preserved):
-make flash_gs
-
-# 4. (Optional) Flash both cores sequentially (CPU1 then CPU2, no mass erase):
-make flash_all_sat
-make flash_all_gs
+# Ground station M0+:
+make flash_GS
 ```
 
 From inside the `nuttx/` directory:

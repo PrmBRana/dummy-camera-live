@@ -4,6 +4,7 @@
 *.dbo
 *.asm
 *.bin
+!nuttx.bin
 *.d
 !*.d/
 *.dSYM

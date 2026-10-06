@@ -7,6 +7,11 @@ build/
 *.swp
 .DS_Store
 
+# Prebuilt images so any laptop can flash without rebuilding NuttX
+!nuttx/nuttx.bin
+!Satellite_M0+/Com_sat/satellite.bin
+!Ground_Station/gs_m0plus.bin
+
 
 
 

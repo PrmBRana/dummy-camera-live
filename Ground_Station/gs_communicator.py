@@ -1548,6 +1548,10 @@ def run_gui(default_port=None, baudrate=115200):
                 ser.write((text.strip() + "\r\n").encode("utf-8"))
                 ser.flush()
                 append_log(f">>> [UPLINK-TX] {text}\n", "tx")
+                append_log(
+                    "    Satellite hears uplink only in LISTEN (437.375 MHz) after CW, "
+                    "FW-ID SAT-G3RUH-UPLINK7. Wait for CW to finish, then send again if no ACK.\n",
+                    "info")
                 cmd_hist_list.insert(0, f"{time.strftime('%H:%M:%S')}  {text}")
                 if cmd_hist_list.size() > 200:
                     cmd_hist_list.delete(200, tk.END)

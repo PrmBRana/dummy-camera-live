@@ -45,7 +45,7 @@ const RadioConfig_t SatelliteProfile = {
 #define BURST_PACKET_COUNT      50
 #define TX_TIMEOUT_MS           1000
 /* 50-second command listen window between CW1 and CW2 as requested. */
-#define SAT_LISTEN_DURATION_MS  (50UL * 1000UL)  /* 50 seconds per CW interval */
+#define SAT_LISTEN_DURATION_MS  (90UL * 1000UL)  /* 90 seconds per CW interval */
 #define SAT_CMD_HOLD_TIME_MS    (60UL * 1000UL)  /* 60 seconds minimum hold after command */
 /* Timeout for M4 to send first flash/camera chunk via ring buffer */
 #define SAT_M4_RESPONSE_TIMEOUT_MS  (5000UL)     /* 5 seconds max wait for M4 ack */
