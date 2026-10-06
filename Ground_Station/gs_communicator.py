@@ -55,6 +55,56 @@ except ImportError:
     print("[ERROR] pyserial is required. Install with: pip3 install pyserial")
     sys.exit(1)
 
+
+def gui_display_available():
+    """Linux needs DISPLAY or Wayland; Windows/macOS can always try Tk."""
+    if sys.platform in ("win32", "darwin"):
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def list_serial_candidates():
+    """USB/ACM/COM adapters first. Motherboard /dev/ttyS* last."""
+    ports = list(serial.tools.list_ports.comports())
+    preferred = []
+    other = []
+    for p in ports:
+        dev = p.device or ""
+        is_usb = any(tag in dev for tag in ("ttyUSB", "ttyACM", "COM", "cu.usb", "cu.usbmodem"))
+        bucket = preferred if is_usb else other
+        bucket.append(p)
+    if not preferred:
+        for path in sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")):
+            preferred.append(type("P", (), {"device": path, "description": "USB serial",
+                                            "hwid": "", "serial_number": None})())
+    out = preferred + [p for p in other if not (p.device or "").startswith("/dev/ttyS")]
+    if not out:
+        out = [type("P", (), {"device": "/dev/ttyACM0", "description": "default ST-LINK",
+                              "hwid": "", "serial_number": None})()]
+    seen = set()
+    uniq = []
+    for p in out:
+        if p.device in seen:
+            continue
+        seen.add(p.device)
+        uniq.append(p)
+    return uniq
+
+
+def port_looks_like_satellite(line):
+    u = line.upper()
+    return "SAT-G3RUH" in u or "UPLINK7" in u or "SATELLITE M0" in u
+
+
+def port_looks_like_nutt_shell(line):
+    u = line.upper()
+    return "NUTTSHELL" in u or line.strip().startswith("nsh>")
+
+
+def port_looks_like_ground_station(line):
+    u = line.upper()
+    return "GS-G3RUH" in u or "GROUND STATION READY" in u or "S2S-2 GROUND STATION" in u
+
 # ============================================================================
 # BRANDING & SATELLITE MISSION CONSTANTS
 # ============================================================================
@@ -1278,31 +1328,40 @@ def run_gui(default_port=None, baudrate=115200):
 
     ttk.Label(conn_bar, text="Serial Port:").pack(side=tk.LEFT, padx=4)
     port_var = tk.StringVar()
-    port_combo = ttk.Combobox(conn_bar, textvariable=port_var, width=16)
+    port_combo = ttk.Combobox(conn_bar, textvariable=port_var, width=18)
     port_combo.pack(side=tk.LEFT, padx=4)
+    port_hint_var = tk.StringVar(value="")
+    tk.Label(conn_bar, textvariable=port_hint_var, bg="#FFFFFF", fg=TEXT_MUTED,
+             font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(2, 6))
 
     def refresh_ports():
-        all_p = [p.device for p in serial.tools.list_ports.comports()]
-        # Prioritize real USB/ACM serial devices over PC motherboard /dev/ttyS* ports
-        usb_ports = [p for p in all_p if "ttyUSB" in p or "ttyACM" in p]
-        if not usb_ports:
-            usb_ports = glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
-        other_ports = [p for p in all_p if p not in usb_ports and not p.startswith("/dev/ttyS")]
-        ports = usb_ports + other_ports
-        if not ports:
-            ports = glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*") + ["/dev/ttyUSB0", "/dev/ttyACM0"]
-        # Remove duplicates while preserving order
-        seen = set()
-        dedup_ports = [x for x in ports if not (x in seen or seen.add(x))]
-        port_combo["values"] = dedup_ports
-        if default_port and default_port in dedup_ports:
-            port_var.set(default_port)
-        elif usb_ports and usb_ports[0] in dedup_ports:
-            port_var.set(usb_ports[0])
-        elif port_var.get() not in dedup_ports and dedup_ports:
-            port_var.set(dedup_ports[0])
+        cands = list_serial_candidates()
+        devices = [p.device for p in cands]
+        port_combo["values"] = devices
+        hints = {p.device: (p.description or "").strip() for p in cands}
+        chosen = None
+        if default_port and default_port in devices:
+            chosen = default_port
+        elif port_var.get() in devices:
+            chosen = port_var.get()
+        elif devices:
+            chosen = devices[0]
+        if chosen:
+            port_var.set(chosen)
+            port_hint_var.set(hints.get(chosen, ""))
+        else:
+            port_hint_var.set("no USB serial — plug GS ST-LINK")
+
+    def on_port_selected(_evt=None):
+        d = port_var.get()
+        for p in list_serial_candidates():
+            if p.device == d:
+                port_hint_var.set((p.description or "").strip())
+                return
+        port_hint_var.set("")
 
     refresh_ports()
+    port_combo.bind("<<ComboboxSelected>>", on_port_selected)
     ttk.Button(conn_bar, text="⟳ Refresh", command=refresh_ports,
                width=9).pack(side=tk.LEFT, padx=4)
 
@@ -2761,10 +2820,50 @@ def run_gui(default_port=None, baudrate=115200):
                 f"+{i:04X}  {hex_part:<48}  |{ascii_part}|\n")
         flash_text.see(tk.END)
 
+    uart_board = {"kind": None}  # "gs" | "sat" | "nsh"
+
+    def warn_wrong_uart(kind, line):
+        if uart_board["kind"]:
+            return
+        uart_board["kind"] = kind
+        if kind == "gs":
+            append_log("+++ GS firmware detected (GS-G3RUH). Downlink UART is correct.\n", "ack")
+            return
+        if kind == "sat":
+            append_log(
+                "!!! WRONG SERIAL PORT: this is the SATELLITE UART, not the Ground Station.\n"
+                "    gs_communicator.py only receives packets from the GS MCU.\n"
+                "    Disconnect, Refresh, and Connect the GS ST-LINK (JC2) COM port.\n",
+                "error")
+            messagebox.showerror(
+                "Wrong COM port — satellite UART",
+                "This serial port is the SATELLITE board.\n\n"
+                "gs_communicator.py cannot receive downlink here.\n"
+                "Disconnect and connect the Ground Station ST-LINK port instead.\n\n"
+                "Look for UART banner:  FW-ID: GS-G3RUH-20261006")
+            return
+        append_log(
+            "!!! This looks like NuttX nsh (M4 console), not GS CPU2 UART.\n"
+            "    Flash Ground_Station/gs_m0plus.bin to the GS board, then reconnect.\n",
+            "error")
+        messagebox.showerror(
+            "Wrong firmware on this UART",
+            "This port is printing NuttX nsh, not Ground Station logs.\n\n"
+            "On the GS Nucleo (JC2):\n"
+            "  cd Ground_Station && make flash_GS\n"
+            "Then reconnect and confirm:  FW-ID: GS-G3RUH-20261006")
+
     def process_incoming_line(raw):
         line = raw.strip()
         if not line:
             return
+
+        if port_looks_like_ground_station(line):
+            warn_wrong_uart("gs", line)
+        elif port_looks_like_nutt_shell(line):
+            warn_wrong_uart("nsh", line)
+        elif port_looks_like_satellite(line):
+            warn_wrong_uart("sat", line)
 
         # JSON payloads
         if line.startswith("{") and line.endswith("}"):
@@ -3151,8 +3250,13 @@ def run_gui(default_port=None, baudrate=115200):
                                             if x.device == p), None)
                 running = True
                 update_connection_state_ui(True, p)
+                uart_board["kind"] = None
                 append_log(
                     f"--- Connected to {p} @ {baud_var.get()} 8N1 ---\n",
+                    "info")
+                append_log(
+                    "    Waiting for GS banner  FW-ID: GS-G3RUH-20261006\n"
+                    "    If you see SAT-G3RUH or nsh> you picked the satellite port.\n",
                     "info")
                 reader_thread = threading.Thread(target=serial_reader,
                                                  daemon=True)
@@ -3199,8 +3303,12 @@ def run_gui(default_port=None, baudrate=115200):
     append_log(f" {APP_TITLE} (GMSK Telecommand & Telemetry Segment)\n", "info")
     append_log(f" Downlink RX : {RX_FREQ_STR}\n", "info")
     append_log(f" Uplink TX   : {TX_FREQ_STR}\n", "info")
-    append_log(" STM32WL55JC2 Ground Station Radio Interface Ready (RFO_HP +22 dBm).\n", "info")
-    append_log(" Auto-detected port: Connect to /dev/ttyUSB0 to receive live satellite downlink.\n", "info")
+    append_log(" This Python GUI does NOT receive RF. It only reads GS MCU UART @ 115200.\n", "info")
+    append_log(" GitHub clone is not enough: flash Ground_Station/gs_m0plus.bin onto JC2 first.\n", "info")
+    append_log("   git clone -b working-firmware https://github.com/PrmBRana/dummy-camera-live.git\n", "info")
+    append_log("   cd dummy-camera-live/Ground_Station && make flash_GS\n", "info")
+    append_log(" Then Connect the GS ST-LINK COM (NOT the satellite COM). Two boards = two ports.\n", "info")
+    append_log(" UART must show:  FW-ID: GS-G3RUH-20261006 | RFO_HP +22 dBm\n", "info")
     append_log("=" * 76 + "\n", "info")
 
     def on_closing():
@@ -3225,11 +3333,8 @@ def run_gui(default_port=None, baudrate=115200):
 
 def run_cli(port=None, baudrate=115200):
     if not port:
-        all_p = [p.device for p in serial.tools.list_ports.comports()]
-        usb_ports = [p for p in all_p if "ttyUSB" in p or "ttyACM" in p]
-        if not usb_ports:
-            usb_ports = glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
-        port = usb_ports[0] if usb_ports else "/dev/ttyUSB0"
+        cands = list_serial_candidates()
+        port = cands[0].device if cands else "/dev/ttyACM0"
 
     print("=" * 72)
     print(f"{ORG_NE}  |  {ORG_EN}")
@@ -3323,7 +3428,7 @@ if __name__ == "__main__":
                     help="Force command-line interface mode")
     a = ap.parse_args()
 
-    if a.cli or not (os.environ.get("DISPLAY") or sys.platform in ("win32", "darwin")):
+    if a.cli or not gui_display_available():
         run_cli(a.port, a.baud)
     else:
         run_gui(a.port, a.baud)

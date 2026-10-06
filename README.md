@@ -5,6 +5,33 @@
 [![Radio: SX126x Sub-GHz](https://img.shields.io/badge/Radio-SX126x%20Sub--GHz-orange.svg)]()
 [![Modulation: GMSK / AX.25 / CW](https://img.shields.io/badge/Modulation-GMSK%20%2F%20AX.25%20%2F%20CW-purple.svg)]()
 
+## Friends: Ground Station GUI after GitHub clone
+
+`Ground_Station/gs_communicator.py` **does not receive radio**. It only reads UART from the **Ground Station MCU** at 115200 8N1.
+
+A default `git clone` of `main` is the old tree and **does not include** `gs_m0plus.bin`. Satellite CW working does **not** mean the GUI will get packets.
+
+```bash
+git clone -b working-firmware https://github.com/PrmBRana/dummy-camera-live.git
+cd dummy-camera-live
+
+# 1) Flash the GS Nucleo (JC2) — USB cable on the GS ST-LINK, not the satellite
+cd Ground_Station
+pip3 install pyserial pillow
+make flash_GS
+# CuteCom/minicom 115200 on the GS COM must show:
+#   FW-ID: GS-G3RUH-20261006 | RFO_HP +22 dBm
+
+# 2) Run the GUI and Connect that same GS COM port
+python3 gs_communicator.py
+```
+
+Two Nucleo boards = two serial ports. If Python is on the **satellite** COM, the GUI receives nothing. Disconnect, Refresh, pick the GS ST-LINK port.
+
+Never flash `satellite.bin` onto the GS board.
+
+---
+
 A complete, production-grade flight firmware and ground station architecture for the **STM32WL55JC** dual-core SoC (Cortex-M4 + Cortex-M0+). 
 
 - **CPU1 (Cortex-M4)** runs **Apache NuttX RTOS**, managing sensor telemetry acquisition (dual 16-channel SPI ADCs, 6-axis IMU/magnetometer), external NOR flash storage formatted with **LittleFS**, and inter-core communication.
