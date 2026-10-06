@@ -2046,21 +2046,34 @@ static void process_ground_commands(void)
             uint16_t num_pkts = ((uint16_t)rx_cmd.cmd[11] << 8) | (uint16_t)rx_cmd.cmd[12];
             if (num_pkts == 0) num_pkts = 1;
 
-            const char *cmd_type_str = (rx_cmd.cmd[4] == 0xF8) ? "FLASH READ (1D D1 F8)" : "HK DOWNLOAD (1D D1 F2)";
-            printf("[OBC_MAIN] Detected %s: addr=0x%08lX pkts=%u -> Streaming %u chunks to M0+\n",
-                   cmd_type_str, (unsigned long)addr, (unsigned)num_pkts, (unsigned)num_pkts);
-
-            /* If HK request, also trigger fresh live telemetry update */
-            if (rx_cmd.cmd[4] == 0xF2)
+            /* Live HK (count 0/1): refresh beacon only. Do not stream N flash
+             * chunks — that raced M0+ (one 128 B live packet) and filled the ring. */
+            if (rx_cmd.cmd[4] == 0xF2 && num_pkts <= 1)
               {
+                printf("[OBC_MAIN] Detected LIVE HK (1D D1 F2, pkts=%u) -> beacon telem only\n",
+                       (unsigned)num_pkts);
                 pthread_mutex_lock(&g_beacon_mutex);
                 ipcc_m4_send(IPCC_CH_BEACON);
                 pthread_mutex_unlock(&g_beacon_mutex);
+                ipcc_m4_send(IPCC_CH_COMMAND);
               }
+            else
+              {
+                const char *cmd_type_str = (rx_cmd.cmd[4] == 0xF8) ? "FLASH READ (1D D1 F8)" : "HK DOWNLOAD (1D D1 F2)";
+                printf("[OBC_MAIN] Detected %s: addr=0x%08lX pkts=%u -> Streaming %u chunks to M0+\n",
+                       cmd_type_str, (unsigned long)addr, (unsigned)num_pkts, (unsigned)num_pkts);
 
-            stream_hk_from_flash(addr, num_pkts);
-            printf("[OBC_MAIN] %s chunks completed -> Notifying M0+ via IPCC\n", cmd_type_str);
-            ipcc_m4_send(IPCC_CH_COMMAND);
+                if (rx_cmd.cmd[4] == 0xF2)
+                  {
+                    pthread_mutex_lock(&g_beacon_mutex);
+                    ipcc_m4_send(IPCC_CH_BEACON);
+                    pthread_mutex_unlock(&g_beacon_mutex);
+                  }
+
+                stream_hk_from_flash(addr, num_pkts);
+                printf("[OBC_MAIN] %s chunks completed -> Notifying M0+ via IPCC\n", cmd_type_str);
+                ipcc_m4_send(IPCC_CH_COMMAND);
+              }
           }
         else if (rx_cmd.cmd[1] == CMD_TYPE_HK &&
                  rx_cmd.cmd[2] == 0x1D &&

@@ -548,7 +548,7 @@ int main(void) {
 
     uart1_puts("\r\n======================================================================\r\n");
     uart1_puts("     STM32WL55 AX.25 + G3RUH 3-STATE MISSION EXECUTIVE READY          \r\n");
-    uart1_puts("     FW-ID: SAT-G3RUH-UPLINK6                                         \r\n");
+    uart1_puts("     FW-ID: SAT-G3RUH-UPLINK7                                         \r\n");
     uart1_puts("     RX: 437.375 MHz | raw then decode then validate | 13B 0x53 trim  \r\n");
     uart1_puts("     CYCLE: CW1 -> LISTEN -> CW2 -> LISTEN                            \r\n");
     uart1_puts("======================================================================\r\n");
@@ -711,7 +711,7 @@ int main(void) {
                                      (unsigned long)(rem_hold / 1000UL));
                     } else if (elapsed < SAT_LISTEN_DURATION_MS) {
                         uint32_t rem = SAT_LISTEN_DURATION_MS - elapsed;
-                        uart1_printf(">>> [M0+ RX] FW-ID SAT-G3RUH-UPLINK6 | raw then decode then validate | %lu s before %s <<<\r\n",
+                        uart1_printf(">>> [M0+ RX] FW-ID SAT-G3RUH-UPLINK7 | raw then decode then validate | %lu s before %s <<<\r\n",
                                      (unsigned long)((rem + 999) / 1000UL),
                                      (s_cw_step == 1) ? "CW2" : "CW1");
                     }
@@ -1014,6 +1014,7 @@ int main(void) {
                     uint16_t count   = (payload_len >= 13) ? (((uint16_t)payload_ptr[11] << 8) | (uint16_t)payload_ptr[12]) :
                                        (payload_len >= 8)  ? (((uint16_t)payload_ptr[6]  << 8) | (uint16_t)payload_ptr[7]) : 0;
                     uint16_t num_pkts = count ? count : 1;
+                    (void)data_id;
 
                     uart1_printf("[M0+ RX CMD] hex(%u):", payload_len);
                     for (uint8_t i = 0; i < payload_len; i++)
@@ -1163,20 +1164,40 @@ int main(void) {
                             Satellite_Send_Ping_Response();
                             Satellite_Send_Ack_Completed(SAT_MISSION_UNKNOWN);
                         } else if (is_hk_cmd) {
-                            uart1_printf("\r\n>>> [M0+ DOWNLINK] LIVE HK TELEMETRY (128 B combined ADC1/ADC2/IMU) <<<\r\n");
-                            Satellite_Send_Ack_Accepted(SAT_MISSION_HK);
-                            Sat_Forward_Command_To_M4(payload_ptr, payload_len);
-                            {
-                                uint32_t wait_start = HAL_GetTick();
-                                while ((HAL_GetTick() - wait_start) < 200UL) {
-                                    if (Satellite_Drain_Telemetry(b1_data, b2_data))
-                                        break;
-                                    CPU2_Delay_Ms(10);
+                            /*
+                             * F2 count 0/1 = live 128 B ADC/IMU HK (HK1 button).
+                             * F2 count N>1 = N stored HK records from M4 (GUI sat_health.txt).
+                             */
+                            if (num_pkts <= 1U) {
+                                uart1_puts("\r\n>>> [M0+ DOWNLINK] LIVE HK TELEMETRY (128 B combined ADC1/ADC2/IMU) <<<\r\n");
+                                Satellite_Send_Ack_Accepted(SAT_MISSION_HK);
+                                Sat_Forward_Command_To_M4(payload_ptr, payload_len);
+                                {
+                                    uint32_t wait_start = HAL_GetTick();
+                                    while ((HAL_GetTick() - wait_start) < 200UL) {
+                                        if (Satellite_Drain_Telemetry(b1_data, b2_data))
+                                            break;
+                                        CPU2_Delay_Ms(10);
+                                    }
                                 }
+                                Satellite_Drain_Telemetry(b1_data, b2_data);
+                                Satellite_Send_HK_Combined_Packet(b1_data, b2_data);
+                                Satellite_Send_Ack_Completed(SAT_MISSION_HK);
+                            } else {
+                                uart1_printf("\r\n>>> [M0+ DOWNLINK] HK DOWNLOAD: %u x 128 B from M4 <<<\r\n",
+                                             num_pkts);
+                                Sat_Forward_Command_To_M4(payload_ptr, payload_len);
+                                Satellite_Send_Ack_Accepted(SAT_MISSION_HK);
+                                {
+                                    uint32_t wait_start = HAL_GetTick();
+                                    while (flash_data_empty() &&
+                                           (HAL_GetTick() - wait_start) < SAT_M4_RESPONSE_TIMEOUT_MS) {
+                                        CPU2_Delay_Ms(10);
+                                    }
+                                }
+                                Satellite_Handle_Flash_Read(addr, num_pkts);
+                                Satellite_Send_Ack_Completed(SAT_MISSION_HK);
                             }
-                            Satellite_Drain_Telemetry(b1_data, b2_data);
-                            Satellite_Send_HK_Combined_Packet(b1_data, b2_data);
-                            Satellite_Send_Ack_Completed(SAT_MISSION_HK);
                         }
                     }
                 } else if (opcode == CMD_REQUEST_BURST || opcode == 0x01) {

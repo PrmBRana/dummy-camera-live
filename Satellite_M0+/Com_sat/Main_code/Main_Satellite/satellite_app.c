@@ -1366,7 +1366,8 @@ void Satellite_Send_HK_Combined_Packet(const int16_t b1[5], const int16_t b2[5])
     pkt[126] = 0xAA;
     pkt[127] = 0xCC;
 
-    const char *pa_mode_str = (s_config.rfSwitchConfig5V == RBI_SWITCH_RFO_LP5V) ? "5V PA (+22dBm / PA0 Boost)" : "3.3V PA (Safe Mode)";
+    const char *pa_mode_str = (s_config.rfSwitchConfig5V == RBI_SWITCH_RFO_LP5V) ?
+        "5V PA (SX1262 10 dBm RFO_LP / PA0 boost)" : "3.3V PA (Safe Mode)";
     uart1_printf("[M0+ TX HK] Sending 128-Byte HK Telemetry Packet (seq=%u, CRC=0x%04X) via %s...\r\n",
                  s_hk_seq, crc, pa_mode_str);
 

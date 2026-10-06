@@ -109,7 +109,7 @@ void RadioApp_Init(
      * dump 200 bytes of noise at ~-124 dBm with no 0x7E flags. */
     RadioApp_ForceOpenGfskParams();
 
-    uart2_puts("RadioApp_Init: FW-ID SAT-G3RUH-UPLINK6\r\n");
+    uart2_puts("RadioApp_Init: FW-ID SAT-G3RUH-UPLINK7\r\n");
     uart2_puts("RadioApp_Init: GFSK RX = preamble 16-bit detect + 200 B, then G3RUH decode\r\n");
     uart2_printf(
         "RadioApp_Init: EXIT\r\n");
