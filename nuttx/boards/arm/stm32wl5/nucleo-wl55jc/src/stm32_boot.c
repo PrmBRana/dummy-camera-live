@@ -151,44 +151,29 @@ static int stm32wl5_mt25q_initialize(void)
   /* MT25Q Page size is 256 bytes (1 MTD block = 256 bytes) */
   #define MTD_BLOCK_SIZE      256
 
-  /* DIE 0: Housekeeping (HK) - 32 MB */
-  /* ADC1 temperature and voltage health for beacon  */
-
-  #define HK1_START_ADDR       0x00000000
-  #define HK1_SIZE             (32 * 1024 * 1024) /* 32 MB = 33, 554, 432 bytes */
-  #define HK1_START_BLOCK      (HK1_START_ADDR / MTD_BLOCK_SIZE) /* Block 0 */
-  #define HK1_NUM_BLOCKS       (HK1_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
-
-  /* ADC2: current information of stallite and IMU data  */
-  #define HK2_START_ADDR       0x02000000
-  #define HK2_SIZE             (32 * 1024 * 1024)
-  #define HK2_START_BLOCK      (HK2_START_ADDR / MTD_BLOCK_SIZE) /* Block 0 */
-  #define HK2_NUM_BLOCKS       (HK2_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
+  /* DIE 0: Unified Housekeeping (HK) - 64 MB (ADC1, ADC2, IMU) */
+  #define HK_START_ADDR        0x00000000
+  #define HK_SIZE              (64 * 1024 * 1024) /* 64 MB = 67,108,864 bytes */
+  #define HK_START_BLOCK       (HK_START_ADDR / MTD_BLOCK_SIZE) /* Block 0 */
+  #define HK_NUM_BLOCKS        (HK_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
 
   /* DIE 1: Camera Images - 64 MB */
-  #define CAM_START_ADDR      0x04000000                       /* 64 MB offset */
-  #define CAM_SIZE            (64 * 1024 * 1024)
-  #define CAM_START_BLOCK     (CAM_START_ADDR / MTD_BLOCK_SIZE) /* Block 262144 */
-  #define CAM_NUM_BLOCKS      (CAM_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
+  #define CAM_START_ADDR       0x04000000                       /* 64 MB offset */
+  #define CAM_SIZE             (64 * 1024 * 1024)
+  #define CAM_START_BLOCK      (CAM_START_ADDR / MTD_BLOCK_SIZE) /* Block 262144 */
+  #define CAM_NUM_BLOCKS       (CAM_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
 
   struct mtd_dev_s *part_hk;
   struct mtd_dev_s *part_cam;
 
-  /* 1. Register Die 0 as /dev/hk (Full 32 MB) */
-  /*HK1 ADC1 partition*/
-  part_hk = mtd_partition(mtd, HK1_START_BLOCK, HK1_NUM_BLOCKS);
+  /* 1. Register Die 0 as /dev/hk (Full 64 MB) */
+  part_hk = mtd_partition(mtd, HK_START_BLOCK, HK_NUM_BLOCKS);
   if (part_hk != NULL)
     {
-      register_mtddriver("/dev/hk1", part_hk, 0666, NULL);
-      syslog(LOG_INFO, "Registered /dev/hk1 (32 MB - Die 0)\n");
+      register_mtddriver("/dev/hk", part_hk, 0666, NULL);
+      syslog(LOG_INFO, "Registered /dev/hk (64 MB - Die 0)\n");
     }
-  /*HK2 ADC2 partition*/
-  part_hk = mtd_partition(mtd, HK2_START_BLOCK, HK2_NUM_BLOCKS);
-  if (part_hk != NULL)
-    {
-      register_mtddriver("/dev/hk2", part_hk, 0666, NULL);
-      syslog(LOG_INFO, "Registered /dev/hk2 (32 MB - Die 0)\n");
-    }
+
   /* 2. Register Die 1 as /dev/camera (Full 64 MB) */
   part_cam = mtd_partition(mtd, CAM_START_BLOCK, CAM_NUM_BLOCKS);
   if (part_cam != NULL)
@@ -198,10 +183,8 @@ static int stm32wl5_mt25q_initialize(void)
     }
 
   printf("MT25Q Flash Partitions:\n");
-  printf("  /dev/hk1:    Start Block: %d, Num Blocks: %d (Size: %d MB)\n",
-         HK1_START_BLOCK, HK1_NUM_BLOCKS, HK1_SIZE / (1024 * 1024));
-  printf("  /dev/hk2:    Start Block: %d, Num Blocks: %d (Size: %d MB)\n",
-         HK2_START_BLOCK, HK2_NUM_BLOCKS, HK2_SIZE / (1024 * 1024));
+  printf("  /dev/hk:     Start Block: %d, Num Blocks: %d (Size: %d MB)\n",
+         HK_START_BLOCK, HK_NUM_BLOCKS, HK_SIZE / (1024 * 1024));
   printf("  /dev/camera: Start Block: %d, Num Blocks: %d (Size: %d MB)\n",
          CAM_START_BLOCK, CAM_NUM_BLOCKS, CAM_SIZE / (1024 * 1024));
 #endif
@@ -388,8 +371,12 @@ void board_late_initialize(void)
     }
 #endif
 
-#if defined(CONFIG_ARCH_BOARD_IPCC)
-  /* Register IPCC driver */
+#if defined(CONFIG_ARCH_BOARD_IPCC) && 0
+  /* Register generic IPCC driver - DISABLED:
+   * M4 and M0+ use dedicated hardware doorbells via Sring_buffer.h and shared SRAM2
+   * ring buffer at 0x20008000. Enabling generic character driver attaches interrupts
+   * that conflict with and corrupt shared SRAM2 ring buffer memory.
+   */
 
   ret = ipcc_init();
   if (ret < 0)
@@ -423,6 +410,31 @@ void board_late_initialize(void)
   fflush(stdout);
   up_mdelay(10);
   stm32wl5_pwr_boot_c2();
+
+  /* Perform immediate initial IPCC Handshake with Cortex-M0+ */
+  modifyreg32(0x58000050, 0, (1 << 20)); /* RCC_AHB3ENR: ensure IPCC clock enabled on M4 */
+  putreg32((1 << 0), 0x58000C08);        /* IPCC_C1SCR: Clear channel 1 RX flag */
+  int boot_hs_retries = 30;
+  bool boot_hs_ok = false;
+  while (boot_hs_retries-- > 0)
+    {
+      putreg32((1 << 16), 0x58000C08);   /* IPCC_C1SCR: Set channel 1 TX flag to M0+ */
+      up_mdelay(10);
+      if ((getreg32(0x58000C1C) & (1 << 0)) != 0) /* IPCC_C2TOC1SR: Check if M0+ answered */
+        {
+          putreg32((1 << 0), 0x58000C08); /* IPCC_C1SCR: Clear RX flag */
+          boot_hs_ok = true;
+          break;
+        }
+    }
+  if (boot_hs_ok)
+    {
+      printf("[SYSTEM] Cortex-M0+ IPCC Handshake SUCCESSFUL on boot!\n");
+    }
+  else
+    {
+      printf("[SYSTEM] Cortex-M0+ boot started (Handshake pending)...\n");
+    }
 #endif
 
 #if defined(CONFIG_STM32WL5_SPI2S2) && defined(CONFIG_ADC_ADS7953)

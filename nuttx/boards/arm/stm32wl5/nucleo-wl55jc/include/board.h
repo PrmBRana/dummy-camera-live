@@ -30,6 +30,7 @@
 #include <nuttx/config.h>
 #ifndef __ASSEMBLY__
 #  include <stdint.h>
+# include <stdbool.h>
 #endif
 
 /* Clocking *****************************************************************/
@@ -122,7 +123,27 @@
  ****************************************************************************/
 
 /* Alternate function pin selections ****************************************/
+/*
+*5V GPIO DC Mission enable pin: PA0
+*3.3V GPIO DC Mission enable pin: PA12
+*GPIO1 mission1 enable pin: PC13
+*GPIO2 mission2 enable pin: PC6
+*/
+#define GPIO_5V_DC_EN_PIN \
+  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+   GPIO_OUTPUT_CLEAR | GPIO_PORTA | GPIO_PIN0)
 
+#define GPIO_3V3_DC_EN_PIN \
+  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+   GPIO_OUTPUT_CLEAR | GPIO_PORTA | GPIO_PIN12)
+
+#define GPIO_MISSION1_EN_PIN \
+  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+   GPIO_OUTPUT_CLEAR | GPIO_PORTC | GPIO_PIN13)
+
+#define GPIO_MISSION2_EN_PIN \
+  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+   GPIO_OUTPUT_CLEAR | GPIO_PORTC | GPIO_PIN6)
 /* USART1:
  *   RXD: PB7   (D0 on arduino pinout)
  *   TXD: PB6   (D1 on arduino pinout)
@@ -266,7 +287,7 @@ extern "C"
  ****************************************************************************/
 
 void stm32wl5_board_initialize(void);
-
+void board_camera_power(bool enable);
 #undef EXTERN
 #if defined(__cplusplus)
 }

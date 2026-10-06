@@ -902,27 +902,18 @@ static int littlefs_telemetry_daemon(void)
 
   printf("\n=======================================================\n");
   printf("  [LITTLEFS DAEMON] Telemetry Storage Consumer Active  \n");
-  printf("  Mount 1: /dev/hk1 (32 MB) -> /mnt/hk1 (ADC1, Footer 0xAA55, 34B)\n");
-  printf("  Mount 2: /dev/hk2 (32 MB) -> /mnt/hk2 (ADC2, Footer 0xBB66, 38B)\n");
+  printf("  Mount: /dev/hk (64 MB - Die 0) -> /mnt/hk (Unified Telemetry)\n");
   printf("=======================================================\n");
 
-  /* 1. Mount Partition 1: /dev/hk1 (32 MB) to /mnt/hk1 */
-  ret = mount_drive("/dev/hk1", "/mnt/hk1");
+  /* 1. Mount Unified Partition: /dev/hk (64 MB) to /mnt/hk */
+  ret = mount_drive("/dev/hk", "/mnt/hk");
   if (ret != OK)
     {
-      printf("[LITTLEFS DAEMON] ERROR: mount_drive(/dev/hk1) failed!\n");
+      printf("[LITTLEFS DAEMON] ERROR: mount_drive(/dev/hk) failed!\n");
       return ret;
     }
 
-  /* 2. Mount Partition 2: /dev/hk2 (32 MB) to /mnt/hk2 */
-  ret = mount_drive("/dev/hk2", "/mnt/hk2");
-  if (ret != OK)
-    {
-      printf("[LITTLEFS DAEMON] ERROR: mount_drive(/dev/hk2) failed!\n");
-      return ret;
-    }
-
-  printf("[LITTLEFS DAEMON] Ready! Both /mnt/hk1 and /mnt/hk2 mounted successfully!\n");
+  printf("[LITTLEFS DAEMON] Ready! /mnt/hk mounted successfully!\n");
   printf("[LITTLEFS DAEMON] Waiting for OBC_main telemetry signals...\n");
 
   while (1)
@@ -936,12 +927,12 @@ static int littlefs_telemetry_daemon(void)
           packet_num++;
 
           /* ================================================================= */
-          /* ROUTE 1: Footer 0xAA55 -> /mnt/hk1/telemetry.bin (ADC 1: 34 Bytes) */
+          /* ROUTE 1: Footer 0xAA55 -> /mnt/hk/telemetry.bin (ADC 1: 34 Bytes) */
           /* ================================================================= */
 
           if (env.footer == TELEM_FOOTER_ADC1)
             {
-              filename = "/mnt/hk1/telemetry.bin";
+              filename = "/mnt/hk/telemetry.bin";
               printf("\n[LITTLEFS DAEMON] ===> RECEIVED ADC1 ENVELOPE (Len: %d B, Footer: 0x%04X) <===\n",
                      env.len, env.footer);
 
@@ -958,9 +949,9 @@ static int littlefs_telemetry_daemon(void)
                              filename, written, errno);
                       if (errno == EFAULT)
                         {
-                          printf("[LITTLEFS DAEMON] Old flash format detected (EFAULT). Auto-formatting /dev/hk1 with 256B geometry...\n");
-                          umount("/mnt/hk1");
-                          mount("/dev/hk1", "/mnt/hk1", "littlefs", 0, "forceformat");
+                          printf("[LITTLEFS DAEMON] Old flash format detected (EFAULT). Auto-formatting /dev/hk with 256B geometry...\n");
+                          umount("/mnt/hk");
+                          mount("/dev/hk", "/mnt/hk", "littlefs", 0, "forceformat");
                           fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
                           if (fd >= 0)
                             {
@@ -997,7 +988,7 @@ static int littlefs_telemetry_daemon(void)
                           };
 
                           stat(filename, &st);
-                          printf("[LITTLEFS DAEMON] [VERIFIED IN FLASH /mnt/hk1 - ALL 16 CHANNELS]:\n");
+                          printf("[LITTLEFS DAEMON] [VERIFIED IN FLASH /mnt/hk - ALL 16 CHANNELS]:\n");
                           for (int k = 0; k < ADC1_CHANNELS_COUNT; k++)
                             {
                               const char *unit = (k < 8) ? "V" : "C";
@@ -1006,7 +997,7 @@ static int littlefs_telemetry_daemon(void)
                                      unit, verify_adc1.data[k]);
                             }
                           printf("  [--] Footer Check    : 0x%04X   [MATCHED 100%%]\n", verify_adc1.footer);
-                          printf("[LITTLEFS DAEMON] [PASS HK1] File Size: %ld B (%ld Packets in /mnt/hk1)\n",
+                          printf("[LITTLEFS DAEMON] [PASS HK1] File Size: %ld B (%ld Packets in /mnt/hk)\n",
                                  (long)st.st_size, (long)(st.st_size / sizeof(struct adc1_packet_s)));
                         }
                       else
@@ -1026,12 +1017,12 @@ static int littlefs_telemetry_daemon(void)
             }
 
           /* ================================================================= */
-          /* ROUTE 2: Footer 0xBB66 -> /mnt/hk2/telemetry.bin (ADC 2: 38 Bytes) */
+          /* ROUTE 2: Footer 0xBB66 -> /mnt/hk/telemetry.bin (ADC 2: 38 Bytes) */
           /* ================================================================= */
 
           else if (env.footer == TELEM_FOOTER_ADC2)
             {
-              filename = "/mnt/hk2/telemetry.bin";
+              filename = "/mnt/hk/telemetry.bin";
               printf("\n[LITTLEFS DAEMON] ===> RECEIVED ADC2 ENVELOPE (Len: %d B, Footer: 0x%04X) <===\n",
                      env.len, env.footer);
 
@@ -1048,9 +1039,9 @@ static int littlefs_telemetry_daemon(void)
                              filename, written, errno);
                       if (errno == EFAULT)
                         {
-                          printf("[LITTLEFS DAEMON] Old flash format detected (EFAULT). Auto-formatting /dev/hk2 with 256B geometry...\n");
-                          umount("/mnt/hk2");
-                          mount("/dev/hk2", "/mnt/hk2", "littlefs", 0, "forceformat");
+                          printf("[LITTLEFS DAEMON] Old flash format detected (EFAULT). Auto-formatting /dev/hk with 256B geometry...\n");
+                          umount("/mnt/hk");
+                          mount("/dev/hk", "/mnt/hk", "littlefs", 0, "forceformat");
                           fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
                           if (fd >= 0)
                             {
@@ -1086,7 +1077,7 @@ static int littlefs_telemetry_daemon(void)
                           };
 
                           stat(filename, &st);
-                          printf("[LITTLEFS DAEMON] [VERIFIED IN FLASH /mnt/hk2 - ALL 12 CHANNELS + IMU]:\n");
+                          printf("[LITTLEFS DAEMON] [VERIFIED IN FLASH /mnt/hk - ALL 12 CHANNELS + IMU]:\n");
                           for (int k = 0; k < ADC2_ACTIVE_CHANNELS; k++)
                             {
                               printf("  [%02d] %-14s : %6.2f A   (x100: %6d)\n",
@@ -1104,7 +1095,7 @@ static int littlefs_telemetry_daemon(void)
                                  (float)verify_adc2.mag_z / 100.0f,
                                  verify_adc2.mag_x, verify_adc2.mag_y, verify_adc2.mag_z);
                           printf("  [--] Footer Check    : 0x%04X   [MATCHED 100%%]\n", verify_adc2.footer);
-                          printf("[LITTLEFS DAEMON] [PASS HK2] File Size: %ld B (%ld Packets in /mnt/hk2)\n",
+                          printf("[LITTLEFS DAEMON] [PASS HK2] File Size: %ld B (%ld Packets in /mnt/hk)\n",
                                  (long)st.st_size, (long)(st.st_size / sizeof(struct adc2_packet_s)));
                         }
                       else
@@ -1151,20 +1142,20 @@ static int littlefs_read_hk1(void)
     "TEMP5",       "TEMP4",         "TEMP3",    "TEMP2"
   };
 
-  /* Auto-mount /dev/hk1 if not already mounted */
-  mount_drive("/dev/hk1", "/mnt/hk1");
+  /* Auto-mount /dev/hk if not already mounted */
+  mount_drive("/dev/hk", "/mnt/hk");
 
-  int fd = open("/mnt/hk1/telemetry.bin", O_RDONLY);
+  int fd = open("/mnt/hk/telemetry.bin", O_RDONLY);
   if (fd < 0)
     {
       if (errno == ENOENT)
         {
-          printf("[INFO] /mnt/hk1/telemetry.bin does not exist yet.\n");
+          printf("[INFO] /mnt/hk/telemetry.bin does not exist yet.\n");
           printf("[INFO] Please run 'launcher' first to record telemetry packets!\n");
         }
       else
         {
-          printf("ERROR: Cannot open /mnt/hk1/telemetry.bin (errno=%d)\n", errno);
+          printf("ERROR: Cannot open /mnt/hk/telemetry.bin (errno=%d)\n", errno);
         }
       return -errno;
     }
@@ -1208,20 +1199,20 @@ static int littlefs_read_hk2(void)
     "RAW_I",         "SP5_I",         "BAT_I",      "SP3_I"
   };
 
-  /* Auto-mount /dev/hk2 if not already mounted */
-  mount_drive("/dev/hk2", "/mnt/hk2");
+  /* Auto-mount /dev/hk if not already mounted */
+  mount_drive("/dev/hk", "/mnt/hk");
 
-  int fd = open("/mnt/hk2/telemetry.bin", O_RDONLY);
+  int fd = open("/mnt/hk/telemetry.bin", O_RDONLY);
   if (fd < 0)
     {
       if (errno == ENOENT)
         {
-          printf("[INFO] /mnt/hk2/telemetry.bin does not exist yet.\n");
+          printf("[INFO] /mnt/hk/telemetry.bin does not exist yet.\n");
           printf("[INFO] Please run 'launcher' first to record telemetry packets!\n");
         }
       else
         {
-          printf("ERROR: Cannot open /mnt/hk2/telemetry.bin (errno=%d)\n", errno);
+          printf("ERROR: Cannot open /mnt/hk/telemetry.bin (errno=%d)\n", errno);
         }
       return -errno;
     }
@@ -1274,33 +1265,20 @@ static int print_partition_sizes(void)
   printf("=================================================================\n");
 
   /* Auto-mount partitions to inspect sizes */
-  mount_drive("/dev/hk1", "/mnt/hk1");
-  mount_drive("/dev/hk2", "/mnt/hk2");
+  mount_drive("/dev/hk", "/mnt/hk");
   mount_drive("/dev/camera", "/mnt/camera");
 
-  printf("  Partition 1: /dev/hk1    (32 MB - Die 0) -> Mount: /mnt/hk1\n");
-  if (stat("/mnt/hk1/telemetry.bin", &st) == 0)
+  printf("  Partition 1: /dev/hk     (64 MB - Die 0) -> Mount: /mnt/hk\n");
+  if (stat("/mnt/hk/telemetry.bin", &st) == 0)
     {
-      printf("    File: /mnt/hk1/telemetry.bin | Size: %ld Bytes (%ld Packets, 34B/pkt)\n",
-             (long)st.st_size, (long)(st.st_size / sizeof(struct adc1_packet_s)));
+      printf("    File: /mnt/hk/telemetry.bin | Size: %ld Bytes\n", (long)st.st_size);
     }
   else
     {
-      printf("    File: /mnt/hk1/telemetry.bin | Size: 0 Bytes (empty / not recorded yet)\n");
+      printf("    File: /mnt/hk/telemetry.bin | Size: 0 Bytes (empty / not recorded yet)\n");
     }
 
-  printf("  Partition 2: /dev/hk2    (32 MB - Die 0) -> Mount: /mnt/hk2\n");
-  if (stat("/mnt/hk2/telemetry.bin", &st) == 0)
-    {
-      printf("    File: /mnt/hk2/telemetry.bin | Size: %ld Bytes (%ld Packets, 38B/pkt)\n",
-             (long)st.st_size, (long)(st.st_size / sizeof(struct adc2_packet_s)));
-    }
-  else
-    {
-      printf("    File: /mnt/hk2/telemetry.bin | Size: 0 Bytes (empty / not recorded yet)\n");
-    }
-
-  printf("  Partition 3: /dev/camera (64 MB - Die 1) -> Mount: /mnt/camera\n");
+  printf("  Partition 2: /dev/camera (64 MB - Die 1) -> Mount: /mnt/camera\n");
   if (stat("/mnt/camera/capture_01.raw", &st) == 0)
     {
       printf("    File: /mnt/camera/capture_01.raw | Size: %ld Bytes\n", (long)st.st_size);
@@ -1324,25 +1302,19 @@ static int littlefs_erase_cmd(int argc, FAR char *argv[])
 {
   if (argc < 3)
     {
-      printf("[LITTLEFS] No partition specified. Erasing/cleaning all partitions (HK1, HK2, Camera)...\n");
-      format_one_partition("/dev/hk1", "/mnt/hk1");
-      format_one_partition("/dev/hk2", "/mnt/hk2");
+      printf("[LITTLEFS] No partition specified. Erasing/cleaning all partitions (HK, Camera)...\n");
+      format_one_partition("/dev/hk", "/mnt/hk");
       format_one_partition("/dev/camera", "/mnt/camera");
       printf("\n[TIP] You can also target specific partitions:\n");
-      printf("  littlefs erase hk1     - Erase/format HK1 partition\n");
-      printf("  littlefs erase hk2     - Erase/format HK2 partition\n");
-      printf("  littlefs erase camera  - Erase/format Camera partition\n");
+      printf("  littlefs erase hk      - Erase/format HK partition (64 MB)\n");
+      printf("  littlefs erase camera  - Erase/format Camera partition (64 MB)\n");
       printf("  littlefs erase all     - Full 128MB chip erase\n\n");
       return 0;
     }
 
-  if (strcmp(argv[2], "hk1") == 0)
+  if (strcmp(argv[2], "hk") == 0 || strcmp(argv[2], "hk1") == 0 || strcmp(argv[2], "hk2") == 0)
     {
-      return format_one_partition("/dev/hk1", "/mnt/hk1");
-    }
-  else if (strcmp(argv[2], "hk2") == 0)
-    {
-      return format_one_partition("/dev/hk2", "/mnt/hk2");
+      return format_one_partition("/dev/hk", "/mnt/hk");
     }
   else if (strcmp(argv[2], "camera") == 0 || strcmp(argv[2], "cam") == 0)
     {
@@ -1435,13 +1407,9 @@ int littlefs_main(int argc, FAR char *argv[])
         }
       else if (strcmp(argv[1], "clean") == 0 || strcmp(argv[1], "clear") == 0)
         {
-          if (argc > 2 && strcmp(argv[2], "hk1") == 0)
+          if (argc > 2 && (strcmp(argv[2], "hk") == 0 || strcmp(argv[2], "hk1") == 0 || strcmp(argv[2], "hk2") == 0))
             {
-              return clean_one_partition("/dev/hk1", "/mnt/hk1");
-            }
-          else if (argc > 2 && strcmp(argv[2], "hk2") == 0)
-            {
-              return clean_one_partition("/dev/hk2", "/mnt/hk2");
+              return clean_one_partition("/dev/hk", "/mnt/hk");
             }
           else if (argc > 2 && (strcmp(argv[2], "camera") == 0 || strcmp(argv[2], "cam") == 0))
             {
@@ -1449,22 +1417,17 @@ int littlefs_main(int argc, FAR char *argv[])
             }
           else
             {
-              printf("[LITTLEFS] Cleaning all partitions (HK1, HK2, Camera)...\n");
-              clean_one_partition("/dev/hk1", "/mnt/hk1");
-              clean_one_partition("/dev/hk2", "/mnt/hk2");
+              printf("[LITTLEFS] Cleaning all partitions (HK, Camera)...\n");
+              clean_one_partition("/dev/hk", "/mnt/hk");
               clean_one_partition("/dev/camera", "/mnt/camera");
               return 0;
             }
         }
       else if (strcmp(argv[1], "format") == 0)
         {
-          if (argc > 2 && strcmp(argv[2], "hk1") == 0)
+          if (argc > 2 && (strcmp(argv[2], "hk") == 0 || strcmp(argv[2], "hk1") == 0 || strcmp(argv[2], "hk2") == 0))
             {
-              return format_one_partition("/dev/hk1", "/mnt/hk1");
-            }
-          else if (argc > 2 && strcmp(argv[2], "hk2") == 0)
-            {
-              return format_one_partition("/dev/hk2", "/mnt/hk2");
+              return format_one_partition("/dev/hk", "/mnt/hk");
             }
           else if (argc > 2 && (strcmp(argv[2], "camera") == 0 || strcmp(argv[2], "cam") == 0))
             {
@@ -1472,9 +1435,8 @@ int littlefs_main(int argc, FAR char *argv[])
             }
           else
             {
-              printf("[LITTLEFS] Formatting all partitions (HK1, HK2, Camera)...\n");
-              format_one_partition("/dev/hk1", "/mnt/hk1");
-              format_one_partition("/dev/hk2", "/mnt/hk2");
+              printf("[LITTLEFS] Formatting all partitions (HK, Camera)...\n");
+              format_one_partition("/dev/hk", "/mnt/hk");
               format_one_partition("/dev/camera", "/mnt/camera");
               return 0;
             }
@@ -1496,10 +1458,10 @@ int littlefs_main(int argc, FAR char *argv[])
         {
           printf("\nUsage: littlefs [command] [target]\n");
           printf("Commands:\n");
-          printf("  read   [hk1 | hk2]            - Dump stored telemetry records\n");
-          printf("  clean  [hk1 | hk2 | camera]   - Delete files, keep format\n");
-          printf("  format [hk1 | hk2 | camera]   - Force-reformat LittleFS partition\n");
-          printf("  erase  [hk1 | hk2 | camera | 4kb | 32kb | 64kb | die | all] - Flash erase\n");
+          printf("  read   [hk | hk1 | hk2]       - Dump stored telemetry records\n");
+          printf("  clean  [hk | camera]          - Delete files, keep format\n");
+          printf("  format [hk | camera]          - Force-reformat LittleFS partition\n");
+          printf("  erase  [hk | camera | 4kb | 32kb | 64kb | die | all] - Flash erase\n");
           printf("  size   [or partition/info]    - Display partition table & file sizes\n");
           printf("  test                          - Run low-level SPI NOR self-test\n");
           printf("  (no args)                     - Run telemetry storage daemon\n\n");

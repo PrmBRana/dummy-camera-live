@@ -331,3 +331,19 @@ int stm32_spi3cmddata(struct spi_dev_s *dev, uint32_t devid, bool cmd)
 #endif /* CONFIG_SPI_CMDDATA */
 
 #endif /* CONFIG_STM32_SPI1 || CONFIG_STM32_SPI2 || CONFIG_STM32_SPI3 */
+
+void board_camera_power(bool enable)
+{
+  _info("Camera Power %s: PA0(5V)=%d, PA12(3.3V)=%d, PC13(Mission1)=%d, PC6(Mission2)=%d\n",
+        enable ? "ENABLE" : "DISABLE", enable, enable, enable, enable);
+
+  stm32wl5_configgpio(GPIO_5V_DC_EN_PIN);
+  stm32wl5_configgpio(GPIO_3V3_DC_EN_PIN);
+  stm32wl5_configgpio(GPIO_MISSION1_EN_PIN);
+  stm32wl5_configgpio(GPIO_MISSION2_EN_PIN);
+
+  stm32wl5_gpiowrite(GPIO_5V_DC_EN_PIN, enable);
+  stm32wl5_gpiowrite(GPIO_3V3_DC_EN_PIN, enable);
+  stm32wl5_gpiowrite(GPIO_MISSION1_EN_PIN, enable);
+  stm32wl5_gpiowrite(GPIO_MISSION2_EN_PIN, enable);
+}

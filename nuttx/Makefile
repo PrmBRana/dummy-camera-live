@@ -40,29 +40,25 @@ else
 include tools/Unix.mk
 endif
 
-CPU2_DIR ?= $(shell if [ -d ../JC2/cpu2 ]; then echo ../JC2/cpu2; elif [ -d ../CPU2 ]; then echo ../CPU2; elif [ -d boards/arm/stm32wl5/nucleo-wl55jc/CPU2 ]; then echo boards/arm/stm32wl5/nucleo-wl55jc/CPU2; else echo CPU2; fi)
+SAT_M0_DIR ?= ../JC1/cpu2
 
-# Flash Cortex-M4 (NuttX) only (0x08000000)
+# Flash Satellite Cortex-M4 (NuttX) only (0x08000000)
 flash_cpu1 flash_m4 flash_M4 flash_CPU1: flash
 
-# Flash Cortex-M0+ from JC2/cpu2 (0x08032000)
-flash_sat flash_SAT flash_cpu2_sat flash_m0 flash_cpu2:
-	$(MAKE) -C $(CPU2_DIR) flash_sat
+# Flash JC1 Satellite Cortex-M0+ from JC1/cpu2 (0x08032000)
+flash_sat flash_SAT flash_cpu2_sat flashsatM0 flash_satM0 flash_m0 flash_M0 flash_cpu2 flash_CPU2:
+	$(MAKE) -C $(SAT_M0_DIR) flash
 
-flash_gs flash_GS flash_cpu2_gs:
-	$(MAKE) -C $(CPU2_DIR) flash_gs
+build_sat_m0:
+	$(MAKE) -C $(SAT_M0_DIR) all
 
-build_m0 build_cpu2:
-	$(MAKE) -C $(CPU2_DIR) all
+clean_sat_m0:
+	$(MAKE) -C $(SAT_M0_DIR) clean
 
-clean_m0 clean_cpu2:
-	$(MAKE) -C $(CPU2_DIR) clean
-
-# Flash both sequentially (M4 first, then M0+, no mass erase)
+# Flash both Satellite cores sequentially (M4 first at 0x08000000, then M0+ at 0x08032000)
 flash_all_sat: flash_cpu1 flash_sat
-flash_all_gs:  flash_cpu1 flash_gs
 
-.PHONY: flash_cpu1 flash_m4 flash_M4 flash_CPU1 flash_gs flash_GS flash_cpu2_gs flash_sat flash_SAT flash_cpu2_sat flash_m0 flash_cpu2 build_m0 build_cpu2 clean_m0 clean_cpu2 flash_all_sat flash_all_gs
+.PHONY: flash_cpu1 flash_m4 flash_M4 flash_CPU1 flash_sat flash_SAT flash_cpu2_sat flashsatM0 flash_satM0 flash_m0 flash_M0 flash_cpu2 flash_CPU2 build_sat_m0 clean_sat_m0 flash_all_sat
 
 endif
 
